@@ -49,7 +49,6 @@ It does **not**:
 - nmap
 - tcpdump
 - nuclei (optional, recommended)
-- tmux (optional)
 
 ---
 
