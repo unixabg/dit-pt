@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dit-pt: Defensive IT Pentest (K-12-friendly) workflow runner
+# Phases:
+# 1) Passive VLAN discovery (sniff 802.1Q tags)
+# 2) Join VLAN (one at a time) via subinterface + DHCP or static
+# 3) Host discovery (arp-scan, optional netdiscover)
+# 4) Lightweight nmap (scoped ports)
+# 5) Build URL targets
+# 6) Nuclei scan with safe profile
+
+NAME="dit-pt"
+VERSION="0.3"
+
+# ---- Defaults (override via env vars or flags) ----
+IFACE="${IFACE:-eth0}"
+WORKDIR="${WORKDIR:-/var/lib/dit-pt}"
+SNIFF_SECS="${SNIFF_SECS:-15}"
+MAX_AUTO_VLANS="${MAX_AUTO_VLANS:-10}"
+
+# Nuclei templates directory (avoid /root ambiguity)
+NUCLEI_TEMPLATES_DIR="${NUCLEI_TEMPLATES_DIR:-$WORKDIR/nuclei-templates}"
+
+# Web/admin-ish ports commonly found in K-12 environments
+PORTS="${PORTS:-21,22,23,80,443,8000,8080,8443,8888,9000,9090,9443}"
+
+# Nuclei knobs (safe-ish)
+NUCLEI_RATE="${NUCLEI_RATE:-50}"
+NUCLEI_CONC="${NUCLEI_CONC:-10}"
+NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-5}"
+NUCLEI_RETRIES="${NUCLEI_RETRIES:-1}"
+NUCLEI_SEV="${NUCLEI_SEV:-info,low,medium}"
+NUCLEI_TAGS="${NUCLEI_TAGS:-exposure,misconfig,ssl,tech}"
+NUCLEI_EXCLUDE_TAGS="${NUCLEI_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive}"
+
+# Tools (must exist)
+REQUIRED_TOOLS=(ip awk sort uniq grep sed date mkdir rm mktemp wc tr timeout head uname)
+OPTIONAL_TOOLS=(tcpdump arp-scan netdiscover nmap nuclei dhclient)
+
+log()  { echo "[+] $*" >&2; }
+warn() { echo "[!] $*" >&2; }
+die()  { echo "[-] $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+$NAME v$VERSION
+
+Usage:
+  $NAME vlans [--iface IFACE] [--secs N]
+      Passive VLAN discovery: sniff 802.1Q tags on IFACE for N seconds.
+      Note: Untagged/native VLAN cannot be identified by ID, but we can detect its presence.
+
+  $NAME run --vlan VLAN_ID [--iface IFACE] [--dhcp | --static CIDR --gw GW] [--skip-netdiscover]
+      Run phases 2-6 on a specific VLAN.
+
+  $NAME run --auto [--iface IFACE] [--secs N] [--max-vlans N] [--allow-vlans CSV] [--include-native] [--skip-netdiscover]
+      Auto mode:
+        - passively discovers tagged VLAN IDs, then scans them (DHCP on each VLAN)
+        - optional: also scan the native/untagged network (DHCP on base interface)
+
+Examples:
+  $NAME vlans --iface eth0 --secs 20
+
+  sudo $NAME run --vlan 30 --iface eth0 --dhcp
+  sudo $NAME run --vlan 30 --static 10.30.0.50/24 --gw 10.30.0.1
+
+  # Auto scan only specific VLANs you are authorized to test
+  sudo $NAME run --auto --iface eth0 --secs 30 --allow-vlans 20,30,52
+
+  # Auto scan plus native/untagged (use with care)
+  sudo $NAME run --auto --include-native --iface eth0 --secs 30 --allow-vlans 20,30,52
+
+Env overrides:
+  IFACE
+      Network interface to use (default: eth0)
+
+  WORKDIR
+      Base working directory for all output and state.
+      Default: /var/lib/dit-pt
+
+  SNIFF_SECS
+      Seconds to sniff VLAN tags (default: 15)
+
+  MAX_AUTO_VLANS
+      Cap number of VLANs scanned in --auto (default: 10)
+
+  PORTS
+      Comma-separated TCP ports to scan
+      Default: 80,443,8000,8080,8443,8888,9000,9090,9443
+
+  NUCLEI_TEMPLATES_DIR
+      Where nuclei templates are stored/updated (default: \$WORKDIR/nuclei-templates)
+
+  NUCLEI_RATE, NUCLEI_CONC, NUCLEI_TIMEOUT, NUCLEI_RETRIES
+  NUCLEI_SEV, NUCLEI_TAGS, NUCLEI_EXCLUDE_TAGS
+
+Notes:
+  - VLAN detection is passive.
+  - Joining a VLAN + scanning is active. Only do so with authorization.
+  - For K-12, prefer --allow-vlans in --auto mode to avoid scanning unintended VLANs.
+EOF
+}
+
+need_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    die "Run as root (required for VLAN interfaces, DHCP, arp-scan, nmap/tcpdump)."
+  fi
+}
+
+check_tools() {
+  for t in "${REQUIRED_TOOLS[@]}"; do
+    command -v "$t" >/dev/null || die "Missing required tool: $t"
+  done
+  for t in "${OPTIONAL_TOOLS[@]}"; do
+    if ! command -v "$t" >/dev/null; then
+      warn "Optional tool not found: $t (some phases may be skipped)"
+    fi
+  done
+}
+
+ensure_dirs() {
+  mkdir -p "$WORKDIR"/{targets,scans,nmap,logs,reports}
+}
+
+# ----- Phase 1: Determine VLANs available (passive) -----
+discover_vlans() {
+  local iface="$1"
+  local secs="$2"
+
+  command -v tcpdump >/dev/null || die "tcpdump required for VLAN sniffing."
+
+  log "Phase 1: Passive VLAN discovery on $iface for ${secs}s"
+  log "Tip: This lists VLAN IDs observed in traffic. Quiet VLANs may not appear."
+
+  timeout "${secs}" tcpdump -i "$iface" -e -n 'vlan' 2>/dev/null \
+    | grep -oE 'vlan [0-9]+' \
+    | awk '{print $2}' \
+    | sort -n \
+    | uniq -c \
+    | awk '{printf "VLAN %s (seen %s frames)\n",$2,$1}' \
+    || true
+
+  if timeout "$secs" tcpdump -i "$iface" -e -n -c 1 'not vlan' >/dev/null 2>&1; then
+    echo "Untagged (native VLAN) traffic observed"
+  else
+    echo "Untagged (native VLAN) traffic NOT observed in this window (may still exist)"
+  fi
+}
+
+# Helper: return only VLAN IDs (tagged) one per line
+discover_vlan_ids() {
+  local iface="$1"
+  local secs="$2"
+  command -v tcpdump >/dev/null || die "tcpdump required for VLAN discovery."
+
+  timeout "${secs}" tcpdump -i "$iface" -e -n 'vlan' 2>/dev/null \
+    | grep -oE 'vlan [0-9]+' \
+    | awk '{print $2}' \
+    | sort -n \
+    | uniq
+}
+
+native_traffic_present() {
+  local iface="$1"
+  local secs="$2"
+  command -v tcpdump >/dev/null || return 1
+  timeout "$secs" tcpdump -i "$iface" -e -n -c 1 'not vlan' >/dev/null 2>&1
+}
+
+filter_allowlist() {
+  # Reads VLAN IDs from stdin; if allowlist empty, passes through unchanged.
+  local allow_csv="${1:-}"
+  if [[ -z "$allow_csv" ]]; then
+    cat
+    return 0
+  fi
+  local allow_space
+  allow_space="$(echo "$allow_csv" | tr ',' ' ')"
+  while read -r v; do
+    [[ -n "$v" ]] || continue
+    for a in $allow_space; do
+      [[ "$v" == "$a" ]] && echo "$v"
+    done
+  done
+}
+
+cap_lines() {
+  # cap stdin to N lines
+  local max="$1"
+  head -n "$max"
+}
+
+# ----- Phase 2: Join VLAN -----
+
+# IMPORTANT: Linux interface names max length is 15 chars.
+# Many USB NICs (enx...) are too long to use as "$iface.$vlan".
+# So we create a short deterministic VLAN interface name like "dit30".
+vlan_iface_name() {
+  local vlan="$1"
+  local name="dit${vlan}"
+  if [[ ${#name} -gt 15 ]]; then
+    name="d${vlan}"
+  fi
+  echo "$name"
+}
+
+ensure_vlan_iface_absent() {
+  local v_if="$1"
+  if ip link show "$v_if" >/dev/null 2>&1; then
+    warn "Interface $v_if already exists; deleting it first"
+    ip link del "$v_if" >/dev/null 2>&1 || true
+  fi
+}
+
+bring_up_vlan_dhcp() {
+  local iface="$1" vlan="$2"
+  local v_if
+  v_if="$(vlan_iface_name "$vlan")"
+
+  ensure_vlan_iface_absent "$v_if"
+
+  log "Phase 2: Creating VLAN interface $v_if (id=$vlan) on $iface"
+  ip link add link "$iface" name "$v_if" type vlan id "$vlan"
+  ip link set "$v_if" up
+
+  command -v dhclient >/dev/null || die "dhclient required for --dhcp"
+  log "Requesting DHCP lease on $v_if"
+  dhclient -v "$v_if" || die "DHCP failed on $v_if"
+
+  echo "$v_if"
+}
+
+bring_up_vlan_static() {
+  local iface="$1" vlan="$2" cidr="$3" gw="$4"
+  local v_if
+  v_if="$(vlan_iface_name "$vlan")"
+
+  ensure_vlan_iface_absent "$v_if"
+
+  log "Phase 2: Creating VLAN interface $v_if (id=$vlan) on $iface"
+  ip link add link "$iface" name "$v_if" type vlan id "$vlan"
+  ip link set "$v_if" up
+
+  log "Assigning static IP $cidr to $v_if"
+  ip addr flush dev "$v_if" || true
+  ip addr add "$cidr" dev "$v_if"
+
+  log "Setting default gateway $gw via $v_if"
+  ip route replace default via "$gw" dev "$v_if"
+
+  echo "$v_if"
+}
+
+teardown_vlan() {
+  local v_if="$1"
+  if [[ -n "$v_if" ]]; then
+    log "Tearing down $v_if"
+    if command -v dhclient >/dev/null; then
+      dhclient -r "$v_if" >/dev/null 2>&1 || true
+    fi
+    ip link del "$v_if" >/dev/null 2>&1 || true
+  fi
+}
+
+# Native/untagged scan helper (DHCP on base interface)
+run_native_phases_dhcp() {
+  local iface="$1"
+  local skip_netdiscover="${2:-0}"
+
+  command -v dhclient >/dev/null || die "dhclient required for native DHCP scan"
+
+  ensure_dirs
+
+  local ts hosts_file nmap_xml urls_file nuclei_out
+  ts="$(date +%Y%m%d-%H%M%S)"
+  hosts_file="$WORKDIR/targets/hosts-native-${ts}.txt"
+  nmap_xml="$WORKDIR/nmap/nmap-native-${ts}.xml"
+  urls_file="$WORKDIR/targets/urls-native-${ts}.txt"
+  nuclei_out="$WORKDIR/reports/nuclei-native-${ts}.jsonl"
+
+  warn "Native scan: requesting DHCP on base interface $iface (this can change host routing)."
+  dhclient -v "$iface" || die "DHCP failed on native interface $iface"
+
+  # Discovery + scans on base iface
+  discover_hosts "$iface" "$hosts_file"
+
+  if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
+    log "Optional: netdiscover passive capture (10s) on $iface"
+    timeout 10 netdiscover -i "$iface" -P -N 2>/dev/null \
+      > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
+  fi
+
+  if [[ -s "$hosts_file" ]]; then
+    nmap_scan_hosts "$hosts_file" "$nmap_xml"
+    build_urls_from_nmap_xml "$nmap_xml" "$urls_file"
+    run_nuclei "$urls_file" "$nuclei_out"
+  else
+    warn "No hosts discovered on native; skipping nmap/nuclei."
+  fi
+
+  log "Native scan artifacts:"
+  echo "  Hosts : $hosts_file"
+  echo "  Nmap  : $nmap_xml"
+  echo "  URLs  : $urls_file"
+  echo "  Nuclei: $nuclei_out"
+}
+
+# ----- Phase 3: Host discovery -----
+discover_hosts() {
+  local ifname="$1"
+  local hosts_out="$2"
+  : > "$hosts_out"
+
+  if command -v arp-scan >/dev/null; then
+    log "Phase 3: arp-scan discovery on $ifname"
+    arp-scan -I "$ifname" -l 2>/dev/null \
+      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {print $1}' \
+      | sort -u >> "$hosts_out" || true
+  else
+    warn "arp-scan not available; skipping active L2 host discovery"
+  fi
+
+  log "Hosts discovered: $(wc -l < "$hosts_out" | tr -d ' ')"
+}
+
+# ----- Phase 4: Lightweight Nmap (scoped ports) -----
+nmap_scan_hosts() {
+  local hosts_file="$1"
+  local out_xml="$2"
+
+  command -v nmap >/dev/null || die "nmap required for scanning."
+
+  log "Phase 4: Nmap scan (scoped ports: $PORTS)"
+  nmap -Pn -sT -sV --version-light -T3 \
+    -p "$PORTS" \
+    -iL "$hosts_file" \
+    -oX "$out_xml" >/dev/null || true
+
+  log "Nmap XML saved to: $out_xml"
+}
+
+# ----- Phase 5: Build URL targets for Nuclei -----
+build_urls_from_nmap_xml() {
+  local nmap_xml="$1"
+  local urls_out="$2"
+  : > "$urls_out"
+
+  log "Phase 5: Building URL list from Nmap XML"
+
+  awk '
+    function emit(ip, port) {
+      if (port=="443" || port=="8443" || port=="9443") {
+        printf "https://%s:%s\n", ip, port
+      } else {
+        printf "http://%s:%s\n", ip, port
+      }
+    }
+    /<host>/ { ip=""; port=""; next }
+    /<address addr="/ {
+      if (match($0, /addr="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"/, m)) ip=m[1]
+    }
+    /<port protocol="tcp" portid="/ {
+      if (match($0, /portid="([0-9]+)"/, m)) port=m[1]
+    }
+    /<state state="open"/ {
+      if (ip != "" && port != "") emit(ip, port)
+    }
+  ' "$nmap_xml" | sort -u > "$urls_out"
+
+  log "URLs written: $urls_out ($(wc -l < "$urls_out" | tr -d ' ') entries)"
+}
+
+# ----- Phase 6: Nuclei (safe-ish) -----
+run_nuclei() {
+  local urls_file="$1"
+  local out_jsonl="$2"
+
+  command -v nuclei >/dev/null || die "nuclei required for nuclei phase."
+
+  if [[ ! -s "$urls_file" ]]; then
+    warn "No URLs to scan; skipping nuclei."
+    return 0
+  fi
+
+  mkdir -p "$NUCLEI_TEMPLATES_DIR"
+
+  # Ensure templates exist in our chosen directory
+  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
+    log "Nuclei templates not found; installing to $NUCLEI_TEMPLATES_DIR"
+    nuclei -update-templates -ut "$NUCLEI_TEMPLATES_DIR" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
+    die "No nuclei templates found in $NUCLEI_TEMPLATES_DIR. Try: sudo nuclei -update-templates"
+  fi
+
+  log "Phase 6: Running nuclei (templates=$NUCLEI_TEMPLATES_DIR, tags=$NUCLEI_TAGS, exclude=$NUCLEI_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
+  nuclei \
+    -l "$urls_file" \
+    -t "$NUCLEI_TEMPLATES_DIR" \
+    -severity "$NUCLEI_SEV" \
+    -tags "$NUCLEI_TAGS" \
+    -exclude-tags "$NUCLEI_EXCLUDE_TAGS" \
+    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
+    -jsonl -o "$out_jsonl" || true
+
+  log "Nuclei results saved: $out_jsonl"
+}
+
+# ----- Main run command -----
+run_all_phases() {
+  local iface="$1" vlan="$2" mode="$3" static_cidr="${4:-}" gw="${5:-}" skip_netdiscover="${6:-0}"
+
+  check_tools
+  ensure_dirs
+
+  local ts v_if hosts_file nmap_xml urls_file nuclei_out
+  ts="$(date +%Y%m%d-%H%M%S)"
+  v_if=""
+
+  trap '[[ -n "${v_if:-}" ]] && teardown_vlan "$v_if"' EXIT
+
+  hosts_file="$WORKDIR/targets/hosts-${vlan}-${ts}.txt"
+  nmap_xml="$WORKDIR/nmap/nmap-${vlan}-${ts}.xml"
+  urls_file="$WORKDIR/targets/urls-${vlan}-${ts}.txt"
+  nuclei_out="$WORKDIR/reports/nuclei-${vlan}-${ts}.jsonl"
+
+  # Phase 2: Join VLAN
+  if [[ "$mode" == "dhcp" ]]; then
+    v_if="$(bring_up_vlan_dhcp "$iface" "$vlan")"
+  else
+    [[ -n "$static_cidr" ]] || die "--static requires CIDR (e.g., 10.30.0.50/24)"
+    [[ -n "$gw" ]] || die "--gw required with --static"
+    v_if="$(bring_up_vlan_static "$iface" "$vlan" "$static_cidr" "$gw")"
+  fi
+
+  # Phase 3: discovery
+  discover_hosts "$v_if" "$hosts_file"
+
+  # Optional passive netdiscover (if present and not skipped)
+  if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
+    log "Optional: netdiscover passive capture (10s) on $v_if"
+    timeout 10 netdiscover -i "$v_if" -P -N 2>/dev/null \
+      > "$WORKDIR/logs/netdiscover-${vlan}-${ts}.log" || true
+  fi
+
+  # Phase 4-6
+  if [[ -s "$hosts_file" ]]; then
+    nmap_scan_hosts "$hosts_file" "$nmap_xml"
+    build_urls_from_nmap_xml "$nmap_xml" "$urls_file"
+    run_nuclei "$urls_file" "$nuclei_out"
+  else
+    warn "No hosts discovered; skipping nmap/nuclei."
+  fi
+
+  log "Done."
+  log "Artifacts:"
+  echo "  VLAN  : $vlan ($v_if on $iface)"
+  echo "  Hosts : $hosts_file"
+  echo "  Nmap  : $nmap_xml"
+  echo "  URLs  : $urls_file"
+  echo "  Nuclei: $nuclei_out"
+}
+
+run_auto() {
+  local iface="$1"
+  local secs="$2"
+  local max_vlans="$3"
+  local allow_csv="$4"
+  local include_native="$5"
+  local skip_netdiscover="$6"
+
+  check_tools
+  ensure_dirs
+
+  log "Auto mode: discovering tagged VLANs on $iface for ${secs}s"
+  local vlans
+  vlans="$(discover_vlan_ids "$iface" "$secs" | filter_allowlist "$allow_csv" | cap_lines "$max_vlans" || true)"
+
+  if [[ -z "$allow_csv" ]]; then
+    warn "Auto mode without --allow-vlans: you may scan unintended VLANs. Strongly recommend setting an allowlist."
+  fi
+
+  if [[ -z "$vlans" ]]; then
+    warn "No tagged VLANs discovered (or none matched allowlist)."
+  else
+    log "VLANs selected to scan (cap=$max_vlans):"
+    echo "$vlans" | sed 's/^/  - VLAN /'
+  fi
+
+  if [[ "$include_native" -eq 1 ]]; then
+    if native_traffic_present "$iface" "$secs"; then
+      log "Untagged/native traffic observed; native scan will be included."
+    else
+      warn "No untagged/native traffic observed during sniff window; native scan may still exist, but wasn't seen."
+      warn "If you still want to test native, keep --include-native; it will attempt DHCP on the base interface."
+    fi
+  fi
+
+  # Scan each VLAN
+  while read -r v; do
+    [[ -n "$v" ]] || continue
+    log "=== Auto scan VLAN $v ==="
+    run_all_phases "$iface" "$v" "dhcp" "" "" "$skip_netdiscover"
+    echo
+  done <<< "$vlans"
+
+  # Native scan last (optional)
+  if [[ "$include_native" -eq 1 ]]; then
+    log "=== Auto scan native/untagged ==="
+    run_native_phases_dhcp "$iface" "$skip_netdiscover"
+  fi
+
+  log "Auto mode complete."
+}
+
+# ----- Argument parsing -----
+cmd="${1:-}"
+shift || true
+
+need_root
+
+case "$cmd" in
+  -h|--help|"")
+    usage
+    ;;
+
+  vlans)
+    check_tools
+    local_iface="$IFACE"
+    local_secs="$SNIFF_SECS"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --iface) local_iface="$2"; shift 2 ;;
+        --secs|--sniff-secs) local_secs="$2"; shift 2 ;;
+        *) die "Unknown arg for vlans: $1" ;;
+      esac
+    done
+    discover_vlans "$local_iface" "$local_secs"
+    ;;
+
+  run)
+    local_iface="$IFACE"
+    vlan_id=""
+    mode="dhcp"
+    static_cidr=""
+    gw=""
+    skip_netdiscover=0
+
+    auto=0
+    include_native=0
+    allow_vlans=""
+    local_secs="$SNIFF_SECS"
+    local_max_vlans="$MAX_AUTO_VLANS"
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --iface) local_iface="$2"; shift 2 ;;
+
+        # manual VLAN mode
+        --vlan) vlan_id="$2"; shift 2 ;;
+        --dhcp) mode="dhcp"; shift ;;
+        --static) mode="static"; static_cidr="$2"; shift 2 ;;
+        --gw) gw="$2"; shift 2 ;;
+
+        # auto mode
+        --auto) auto=1; shift ;;
+        --include-native) include_native=1; shift ;;
+        --allow-vlans) allow_vlans="$2"; shift 2 ;;
+        --secs|--sniff-secs) local_secs="$2"; shift 2 ;;
+        --max-vlans) local_max_vlans="$2"; shift 2 ;;
+
+        # general overrides
+        --workdir) WORKDIR="$2"; shift 2 ;;
+        --ports) PORTS="$2"; shift 2 ;;
+        --nuclei-templates-dir) NUCLEI_TEMPLATES_DIR="$2"; shift 2 ;;
+        --nuclei-rate) NUCLEI_RATE="$2"; shift 2 ;;
+        --nuclei-conc) NUCLEI_CONC="$2"; shift 2 ;;
+        --nuclei-timeout) NUCLEI_TIMEOUT="$2"; shift 2 ;;
+        --nuclei-retries) NUCLEI_RETRIES="$2"; shift 2 ;;
+        --nuclei-severity) NUCLEI_SEV="$2"; shift 2 ;;
+        --nuclei-tags) NUCLEI_TAGS="$2"; shift 2 ;;
+        --nuclei-exclude-tags) NUCLEI_EXCLUDE_TAGS="$2"; shift 2 ;;
+
+        --skip-netdiscover) skip_netdiscover=1; shift ;;
+        *) die "Unknown argument: $1" ;;
+      esac
+    done
+
+    # Auto mode
+    if [[ "$auto" -eq 1 ]]; then
+      [[ "$mode" == "dhcp" ]] || die "--auto currently supports DHCP scanning only (drop --static/--gw)"
+      run_auto "$local_iface" "$local_secs" "$local_max_vlans" "$allow_vlans" "$include_native" "$skip_netdiscover"
+      exit 0
+    fi
+
+    # Manual VLAN mode
+    [[ -n "$vlan_id" ]] || die "run requires --vlan VLAN_ID (or use --auto)"
+    [[ "$vlan_id" =~ ^[0-9]+$ ]] || die "VLAN must be numeric"
+
+    if [[ "$mode" == "dhcp" ]]; then
+      run_all_phases "$local_iface" "$vlan_id" "dhcp" "" "" "$skip_netdiscover"
+    else
+      [[ -n "$static_cidr" ]] || die "--static requires CIDR"
+      [[ -n "$gw" ]] || die "--gw required with --static"
+      run_all_phases "$local_iface" "$vlan_id" "static" "$static_cidr" "$gw" "$skip_netdiscover"
+    fi
+    ;;
+
+  *)
+    die "Unknown command: $cmd (use --help)"
+    ;;
+esac
+

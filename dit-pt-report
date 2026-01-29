@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+dit-pt-report
+
+Generate reports from Nuclei JSONL output.
+
+Usage:
+  dit-pt-report --in FILE.jsonl [--out-dir DIR] [--prefix NAME]
+
+Options:
+  --in FILE.jsonl    Input nuclei JSONL file (required)
+  --out-dir DIR      Output directory (default: current dir)
+  --prefix NAME      Output filename prefix (default: input filename w/o .jsonl)
+  -h, --help         Show help
+EOF
+}
+
+die() { echo "[-] $*" >&2; exit 1; }
+
+check_requirements() {
+  local missing=0
+  for cmd in jq; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "[-] Missing required tool: $cmd" >&2
+      missing=1
+    fi
+  done
+
+  if [[ "$missing" -eq 1 ]]; then
+    echo >&2
+    echo "Install missing dependencies and re-run." >&2
+    echo >&2
+    echo "Examples:" >&2
+    echo "  Debian/Ubuntu: sudo apt install jq" >&2
+    echo "  RHEL/CentOS : sudo dnf install jq" >&2
+    echo "  Arch       : sudo pacman -S jq" >&2
+    echo "  macOS      : brew install jq" >&2
+    exit 1
+  fi
+}
+
+IN=""
+OUT_DIR="."
+PREFIX=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --in) IN="$2"; shift 2 ;;
+    --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --prefix) PREFIX="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$IN" ]] || die "--in is required"
+[[ -f "$IN" ]] || die "Input file not found: $IN"
+
+check_requirements
+mkdir -p "$OUT_DIR"
+
+if [[ -z "$PREFIX" ]]; then
+  PREFIX="$(basename "$IN" .jsonl)"
+fi
+
+MD_OUT="$OUT_DIR/$PREFIX.md"
+CSV_OUT="$OUT_DIR/$PREFIX.csv"
+
+echo "[*] Generating report from $IN"
+
+# --------------------
+# CSV OUTPUT
+# --------------------
+jq -r '
+  [
+    (.timestamp // ""),
+    (.host // "unknown-host"),
+    (.url // .["matched-at"] // ""),
+    (.info.severity // "unknown"),
+    (."template-id" // "unknown-template"),
+    (.info.name // "(no name)"),
+    (.["matcher-name"] // "")
+  ] | @csv
+' "$IN" > "$CSV_OUT"
+
+# --------------------
+# MARKDOWN REPORT
+# --------------------
+{
+  echo "# dit-pt Findings Report"
+  echo
+  echo "**Source:** \`$IN\`"
+  echo
+
+  echo "## Summary by Severity"
+  jq -r '.info.severity // "unknown"' "$IN" | sort | uniq -c | sort -nr | \
+    awk '{printf "- **%s**: %s\n",$2,$1}'
+  echo
+
+  echo "## Top Hosts"
+  jq -r '.host // "unknown-host"' "$IN" | sort | uniq -c | sort -nr | head | \
+    awk '{printf "- `%s`: %s findings\n",$2,$1}'
+  echo
+
+  echo "## Findings by Host"
+  echo
+
+  jq -r '
+    [
+      (.host // "unknown-host"),
+      (.info.severity // "unknown"),
+      (."template-id" // "unknown-template"),
+      (.info.name // "(no name)"),
+      (.url // .["matched-at"] // "")
+    ] | @tsv
+  ' "$IN" \
+  | sort \
+  | awk -F'\t' '
+  function sev_icon(s) {
+    if (s=="critical") return "🔥";
+    if (s=="high")     return "❗";
+    if (s=="medium")   return "⚠️";
+    if (s=="low")      return "🟡";
+    return "ℹ️";
+  }
+  function sev_rank(s) {
+    if (s=="critical") return 1;
+    if (s=="high")     return 2;
+    if (s=="medium")   return 3;
+    if (s=="low")      return 4;
+    return 5;  # info / unknown
+  }
+
+  {
+    host=$1; sev=$2; tid=$3; name=$4; url=$5;
+    key = host SUBSEP sev SUBSEP tid;
+
+    hosts[host]=1;
+    sev_seen[host,sev]=1;
+    title[key]=name;
+
+    # Track worst (highest priority) severity per host for sorting hosts
+    if (!(host in worst) || sev_rank(sev) < worst[host]) {
+      worst[host] = sev_rank(sev)
+    }
+
+    if (url != "") {
+      if (!(seen[key,url]++)) {
+        urls[key] = urls[key] "\n  - " url;
+      }
+    }
+  }
+
+  END {
+    # Build host list
+    n = 0
+    for (h in hosts) {
+      hostlist[++n] = h
+    }
+
+    # Sort hosts by worst severity (ascending rank = higher priority)
+    for (i = 1; i <= n; i++) {
+      for (j = i + 1; j <= n; j++) {
+        if (worst[hostlist[j]] < worst[hostlist[i]]) {
+          tmp = hostlist[i]
+          hostlist[i] = hostlist[j]
+          hostlist[j] = tmp
+        } else if (worst[hostlist[j]] == worst[hostlist[i]] && hostlist[j] < hostlist[i]) {
+          # Tie-break: lexical by host string for stable-ish output
+          tmp = hostlist[i]
+          hostlist[i] = hostlist[j]
+          hostlist[j] = tmp
+        }
+      }
+    }
+
+    first = 1
+    for (i = 1; i <= n; i++) {
+      h = hostlist[i]
+
+      if (!first) print "\n---\n"
+      first = 0
+
+      print "### 🖥️ " h "\n"
+
+      # Print severities in priority order
+      for (order = 1; order <= 5; order++) {
+        found = 0
+
+        # Only print a severity header if it exists for this host
+        for (s in sev_seen) {
+          split(s, x, SUBSEP)
+          if (x[1] != h) continue
+
+          sev = x[2]
+          if (sev_rank(sev) != order) continue
+
+          if (!found) {
+            printf "#### %s %s\n\n", sev_icon(sev), toupper(sev)
+            found = 1
+          }
+
+          for (k in title) {
+            split(k, y, SUBSEP)
+            if (y[1] != h || y[2] != sev) continue
+
+            printf "- **%s** (`%s`)\n", title[k], y[3]
+            if (urls[k] != "") print urls[k]
+            print ""
+          }
+        }
+      }
+    }
+  }'
+} > "$MD_OUT"
+
+echo "[+] Report written:"
+echo "    Markdown: $MD_OUT"
+echo "    CSV     : $CSV_OUT"
+
