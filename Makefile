@@ -1,8 +1,8 @@
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
-DIT_PT = dit-pt.sh
-DIT_PT_REPORT = dit-pt-report.sh
+DIT_PT = dit-pt
+DIT_PT_REPORT = dit-pt-report
 
 .PHONY: help install uninstall deps nuclei check
 
