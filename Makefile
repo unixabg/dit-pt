@@ -3,6 +3,7 @@ BINDIR ?= $(PREFIX)/bin
 
 DIT_PT = dit-pt
 DIT_PT_REPORT = dit-pt-report
+WORKDIR ?= /var/lib/dit-pt
 
 .PHONY: help install uninstall deps nuclei check
 
@@ -22,7 +23,14 @@ install:
 	@echo "[*] Installing dit-pt..."
 	install -m 0755 $(DIT_PT) $(BINDIR)/dit-pt
 	install -m 0755 $(DIT_PT_REPORT) $(BINDIR)/dit-pt-report
-	@echo "[+] Installed to $(BINDIR)"
+
+	@echo "[*] Creating work directory..."
+	mkdir -p $(WORKDIR)
+	mkdir -p $(WORKDIR)/{logs,reports,targets,nmap}
+	chmod 755 $(WORKDIR)
+	chown root:root $(WORKDIR)
+
+	@echo "[+] Installed successfully"
 
 deps:
 	@echo "[*] Installing dependencies..."
