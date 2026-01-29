@@ -1,6 +1,6 @@
 # dit-pt
 
-**Defensive Infrastructure Testing — Passive-first Network Assessment**
+**Defensive Infrastructure Testing — Passive-first Testing & Network Assessment**
 
 `dit-pt` is a lightweight Bash-based tool for safely inspecting network segments,
 discovering active hosts, and identifying exposed services using a non-intrusive workflow.
