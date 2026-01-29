@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# dit-pt: Defensive IT Pentest (K-12-friendly) workflow runner
+# dit-pt: Defensive Infrastructure Testing — Passive-first Testing & Network Assessment
 # Phases:
 # 1) Passive VLAN discovery (sniff 802.1Q tags)
 # 2) Join VLAN (one at a time) via subinterface + DHCP or static
