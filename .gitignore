@@ -1,0 +1,36 @@
+# ---- OS / Editor ----
+.DS_Store
+*.swp
+*.swo
+*.bak
+*~
+.vscode/
+.idea/
+
+# ---- Runtime output ----
+/var/
+/logs/
+/output/
+/reports/
+/targets/
+/nmap/
+
+# ---- Generated scan artifacts ----
+*.jsonl
+*.xml
+*.csv
+*.md
+*.log
+
+# ---- Temporary files ----
+tmp/
+tmp.*
+
+# ---- Credentials (just in case) ----
+*.key
+*.pem
+*.crt
+
+# ---- Misc ----
+nohup.out
+
