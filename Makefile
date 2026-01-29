@@ -40,6 +40,8 @@ deps:
 			jq \
 			nmap \
 			tcpdump \
+			arp-scan \
+			netdiscover \
 			ca-certificates \
 			curl; \
 	elif command -v dnf >/dev/null 2>&1; then \
@@ -48,6 +50,8 @@ deps:
 			jq \
 			nmap \
 			tcpdump \
+			arp-scan \
+			netdiscover \
 			ca-certificates \
 			curl; \
 	else \
@@ -76,6 +80,8 @@ check:
 	@command -v jq >/dev/null || echo "Missing: jq"
 	@command -v nmap >/dev/null || echo "Missing: nmap"
 	@command -v tcpdump >/dev/null || echo "Missing: tcpdump"
+	@command -v arp-scan >/dev/null || echo "Missing: arp-scan (recommended)"
+	@command -v netdiscover >/dev/null || echo "Missing: netdiscover (optional)"
 	@command -v nuclei >/dev/null || echo "Missing: nuclei (optional)"
 	@echo "[+] Check complete"
 

@@ -48,6 +48,8 @@ It does **not**:
 - jq
 - nmap
 - tcpdump
+- arp-scan
+- netdiscover
 - nuclei (optional, recommended)
 
 ---
