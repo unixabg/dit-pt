@@ -32,6 +32,7 @@ WEB_PORTS="${WEB_PORTS:-80,443,8000,8080,8443,8888,9000,9090,9443}"
 NET_PORTS="${NET_PORTS:-21,22,23}"
 
 # Nuclei knobs (safe-ish)
+NO_NUCLEI="${NO_NUCLEI:-0}"
 NUCLEI_RATE="${NUCLEI_RATE:-50}"
 NUCLEI_CONC="${NUCLEI_CONC:-10}"
 NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-5}"
@@ -53,6 +54,10 @@ log()  { echo "[+] $*" >&2; }
 warn() { echo "[!] $*" >&2; }
 die()  { echo "[-] $*" >&2; exit 1; }
 
+nuclei_enabled() {
+  [[ "${NO_NUCLEI:-0}" -ne 1 ]] && command -v nuclei >/dev/null 2>&1
+}
+
 usage() {
   cat <<EOF
 $NAME v$VERSION
@@ -62,13 +67,79 @@ Usage:
       Passive VLAN discovery: sniff 802.1Q tags on IFACE for N seconds.
       Note: Untagged/native VLAN cannot be identified by ID, but we can detect its presence.
 
-  $NAME run --vlan VLAN_ID [--iface IFACE] [--dhcp | --static CIDR --gw GW] [--skip-netdiscover]
+  $NAME run --vlan VLAN_ID [--iface IFACE] [--dhcp | --static CIDR --gw GW]
+      [--skip-netdiscover] [--no-nuclei]
+      [--workdir DIR] [--ports CSV]
+      [--nuclei-templates-dir DIR]
+      [--nuclei-rate N] [--nuclei-conc N] [--nuclei-timeout S] [--nuclei-retries N]
+      [--nuclei-severity CSV] [--nuclei-tags CSV] [--nuclei-exclude-tags CSV]
       Run phases 2-6 on a specific VLAN.
 
-  $NAME run --auto [--iface IFACE] [--secs N] [--max-vlans N] [--allow-vlans CSV] [--include-native] [--skip-netdiscover]
+  $NAME run --auto [--iface IFACE] [--secs N] [--max-vlans N]
+      [--allow-vlans CSV] [--include-native] [--skip-netdiscover] [--no-nuclei]
+      [--workdir DIR] [--ports CSV]
+      [--nuclei-templates-dir DIR]
+      [--nuclei-rate N] [--nuclei-conc N] [--nuclei-timeout S] [--nuclei-retries N]
+      [--nuclei-severity CSV] [--nuclei-tags CSV] [--nuclei-exclude-tags CSV]
       Auto mode:
         - passively discovers tagged VLAN IDs, then scans them (DHCP on each VLAN)
         - optional: also scan the native/untagged network (DHCP on base interface)
+
+Options (run/auto):
+  --iface IFACE
+      Network interface to use (default: \$IFACE)
+
+  --workdir DIR
+      Base working directory for all output and state (default: \$WORKDIR)
+
+  --ports CSV
+      Comma-separated TCP ports for Nmap to scan (default: \$PORTS)
+
+  --skip-netdiscover
+      Skip optional netdiscover passive capture.
+
+  --no-nuclei
+      Skip Nuclei entirely (both HTTP and network templates).
+      If nuclei is not installed, scans are also skipped with a warning.
+
+Manual VLAN options:
+  --vlan VLAN_ID
+      VLAN ID to scan.
+
+  --dhcp
+      Obtain an address via DHCP on the VLAN interface (default).
+
+  --static CIDR --gw GW
+      Use a static address (CIDR) and default gateway on the VLAN interface.
+
+Auto mode options:
+  --auto
+      Discover tagged VLANs passively and scan them.
+
+  --secs N
+      Seconds to sniff VLAN tags in auto/vlans mode (default: \$SNIFF_SECS)
+
+  --max-vlans N
+      Cap number of VLANs scanned in --auto (default: \$MAX_AUTO_VLANS)
+
+  --allow-vlans CSV
+      Only scan these VLAN IDs (strongly recommended).
+
+  --include-native
+      Also scan the native/untagged network (DHCP on base interface).
+
+Nuclei options:
+  --nuclei-templates-dir DIR
+      Where nuclei templates are stored/updated (default: \$NUCLEI_TEMPLATES_DIR)
+
+  --nuclei-rate N
+  --nuclei-conc N
+  --nuclei-timeout S
+  --nuclei-retries N
+  --nuclei-severity CSV
+  --nuclei-tags CSV
+  --nuclei-exclude-tags CSV
+      Control Nuclei execution for the HTTP scan. (Network scan uses safe defaults in-code.)
 
 Examples:
   $NAME vlans --iface eth0 --secs 20
@@ -82,56 +153,30 @@ Examples:
   # Auto scan plus native/untagged (use with care)
   sudo $NAME run --auto --include-native --iface eth0 --secs 30 --allow-vlans 20,30,52
 
-Env overrides:
-  IFACE
-      Network interface to use (default: eth0)
-
-  WORKDIR
-      Base working directory for all output and state.
-      Default: /var/lib/dit-pt
-
-  SNIFF_SECS
-      Seconds to sniff VLAN tags (default: 15)
-
-  MAX_AUTO_VLANS
-      Cap number of VLANs scanned in --auto (default: 10)
-
-  PORTS
-      Comma-separated TCP ports to scan
-      Default: 80,443,8000,8080,8443,8888,9000,9090,9443
-
-  NUCLEI_TEMPLATES_DIR
-      Where nuclei templates are stored/updated (default: \$WORKDIR/nuclei-templates)
-
-  NUCLEI_RATE, NUCLEI_CONC, NUCLEI_TIMEOUT, NUCLEI_RETRIES
-  NUCLEI_SEV, NUCLEI_TAGS, NUCLEI_EXCLUDE_TAGS
-
 Output files:
   targets/urls-*.txt
-      HTTP(S) endpoints derived from Nmap
+      HTTP(S) endpoints derived from Nmap (web ports only)
 
   targets/hostports-*.txt
-      Non-HTTP services (e.g., 21/22/23)
+      Non-HTTP services as host:port (e.g., 21/22/23)
 
   reports/nuclei-*.jsonl
-      Web vulnerability findings
+      Web findings (HTTP templates)
 
   reports/nuclei-network-*.jsonl
-      Network/service discovery findings
+      Network/service findings (network templates)
 
 Notes:
   - VLAN discovery is passive.
   - Joining a VLAN and scanning is active — only do so with authorization.
-  - Two Nuclei scans are performed:
-      1) HTTP(S) scan against web ports (80/443/etc)
-      2) Network scan against non-HTTP services (FTP/SSH/Telnet)
-  - Network scans are passive and do NOT attempt authentication.
-  - Results are written to:
-      * nuclei-<scope>.jsonl        (HTTP findings)
-      * nuclei-network-<scope>.jsonl (network/service findings)
-  - For reporting, both files should be consumed together.
+  - Two Nuclei scans may be performed:
+      1) HTTP(S) scan against web ports (urls-*.txt)
+      2) Network scan against non-HTTP services (hostports-*.txt)
+  - Network scan is configured to avoid authentication attempts by default.
+  - For reporting, consume both JSONL files together.
 EOF
 }
+
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -339,8 +384,13 @@ run_native_phases_dhcp() {
   echo "  Nmap      : $nmap_xml"
   echo "  URLs      : $urls_file"
   echo "  Hostports : $hostports_file"
-  echo "  Nuclei    : $nuclei_out"
-  echo "  NucleiNet : $nuclei_net_out"
+  if nuclei_enabled; then
+    echo "  Nuclei    : $nuclei_out"
+    echo "  NucleiNet : $nuclei_net_out"
+  else
+    echo "  Nuclei    : (skipped)"
+    echo "  NucleiNet : (skipped)"
+  fi
 }
 
 # ----- Phase 3: Host discovery -----
@@ -445,7 +495,15 @@ run_nuclei() {
   local urls_file="$1"
   local out_jsonl="$2"
 
-  command -v nuclei >/dev/null || die "nuclei required for nuclei phase."
+  if [[ "${NO_NUCLEI:-0}" -eq 1 ]]; then
+    warn "Nuclei disabled (--no-nuclei); skipping."
+    return 0
+  fi
+
+  if ! command -v nuclei >/dev/null; then
+    warn "nuclei not found; skipping nuclei scan."
+    return 0
+  fi
 
   if [[ ! -s "$urls_file" ]]; then
     warn "No URLs to scan; skipping nuclei."
@@ -482,7 +540,15 @@ run_nuclei_network() {
   local hostports_file="$1"
   local out_jsonl="$2"
 
-  command -v nuclei >/dev/null || die "nuclei required for nuclei phase."
+  if [[ "${NO_NUCLEI:-0}" -eq 1 ]]; then
+    warn "Nuclei disabled (--no-nuclei); skipping."
+    return 0
+  fi
+
+  if ! command -v nuclei >/dev/null; then
+    warn "nuclei not found; skipping nuclei scan."
+    return 0
+  fi
 
   if [[ ! -s "$hostports_file" ]]; then
     warn "No host:port targets to scan; skipping nuclei network scan."
@@ -687,6 +753,7 @@ case "$cmd" in
         # general overrides
         --workdir) WORKDIR="$2"; shift 2 ;;
         --ports) PORTS="$2"; shift 2 ;;
+        --no-nuclei) NO_NUCLEI=1; shift ;;
         --nuclei-templates-dir) NUCLEI_TEMPLATES_DIR="$2"; shift 2 ;;
         --nuclei-rate) NUCLEI_RATE="$2"; shift 2 ;;
         --nuclei-conc) NUCLEI_CONC="$2"; shift 2 ;;
