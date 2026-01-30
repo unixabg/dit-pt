@@ -17,6 +17,7 @@ VERSION="0.3"
 IFACE="${IFACE:-eth0}"
 WORKDIR="${WORKDIR:-/var/lib/dit-pt}"
 SNIFF_SECS="${SNIFF_SECS:-15}"
+NETDISCOVER_SECS="${NETDISCOVER_SECS:-10}"
 MAX_AUTO_VLANS="${MAX_AUTO_VLANS:-10}"
 
 # Nuclei templates directory (avoid /root ambiguity)
@@ -32,7 +33,6 @@ WEB_PORTS="${WEB_PORTS:-80,443,8000,8080,8443,8888,9000,9090,9443}"
 NET_PORTS="${NET_PORTS:-21,22,23}"
 
 # Nuclei knobs (safe-ish)
-NO_NUCLEI="${NO_NUCLEI:-0}"
 NUCLEI_RATE="${NUCLEI_RATE:-50}"
 NUCLEI_CONC="${NUCLEI_CONC:-10}"
 NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-5}"
@@ -46,6 +46,9 @@ NUCLEI_EXCLUDE_TAGS="${NUCLEI_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive}"
 NUCLEI_NET_TAGS="${NUCLEI_NET_TAGS:-network,discovery,info}"
 NUCLEI_NET_EXCLUDE_TAGS="${NUCLEI_NET_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive,credentials,credential,login,auth,default,default-login}"
 
+# Control switches
+NO_NUCLEI="${NO_NUCLEI:-0}"
+
 # Tools (must exist)
 REQUIRED_TOOLS=(ip awk sort uniq grep sed date mkdir rm mktemp wc tr timeout head uname)
 OPTIONAL_TOOLS=(tcpdump arp-scan netdiscover nmap nuclei dhclient)
@@ -54,6 +57,7 @@ log()  { echo "[+] $*" >&2; }
 warn() { echo "[!] $*" >&2; }
 die()  { echo "[-] $*" >&2; exit 1; }
 
+# Return success if nuclei should run (not disabled and binary present)
 nuclei_enabled() {
   [[ "${NO_NUCLEI:-0}" -ne 1 ]] && command -v nuclei >/dev/null 2>&1
 }
@@ -69,14 +73,17 @@ Usage:
 
   $NAME run --vlan VLAN_ID [--iface IFACE] [--dhcp | --static CIDR --gw GW]
       [--skip-netdiscover] [--no-nuclei]
+      [--netdiscover-secs N]
       [--workdir DIR] [--ports CSV]
       [--nuclei-templates-dir DIR]
       [--nuclei-rate N] [--nuclei-conc N] [--nuclei-timeout S] [--nuclei-retries N]
       [--nuclei-severity CSV] [--nuclei-tags CSV] [--nuclei-exclude-tags CSV]
-      Run phases 2-6 on a specific VLAN.
+      Scan a specific VLAN (phases 2-6).
 
   $NAME run --auto [--iface IFACE] [--secs N] [--max-vlans N]
-      [--allow-vlans CSV] [--include-native] [--skip-netdiscover] [--no-nuclei]
+      [--allow-vlans CSV] [--include-native]
+      [--skip-netdiscover] [--no-nuclei]
+      [--netdiscover-secs N]
       [--workdir DIR] [--ports CSV]
       [--nuclei-templates-dir DIR]
       [--nuclei-rate N] [--nuclei-conc N] [--nuclei-timeout S] [--nuclei-retries N]
@@ -85,52 +92,49 @@ Usage:
         - passively discovers tagged VLAN IDs, then scans them (DHCP on each VLAN)
         - optional: also scan the native/untagged network (DHCP on base interface)
 
-Options (run/auto):
+  $NAME run --replay TS [--iface IFACE] [--allow-vlans CSV] [--include-native]
+      [--no-nuclei]
+      Replay Nuclei against saved targets from a prior run timestamp (e.g., 20260129-161131).
+      In replay mode, discovery and Nmap are skipped. Targets are loaded from:
+        targets/urls-<scope>-TS.txt and targets/hostports-<scope>-TS.txt
+      If --allow-vlans is set, only those VLAN IDs are replayed. Use --include-native to replay native scope.
+
+Options:
   --iface IFACE
-      Network interface to use (default: \$IFACE)
+      Network interface to use (default: $IFACE)
 
   --workdir DIR
-      Base working directory for all output and state (default: \$WORKDIR)
+      Base working directory for all output and state (default: $WORKDIR)
 
   --ports CSV
-      Comma-separated TCP ports for Nmap to scan (default: \$PORTS)
+      Comma-separated TCP ports for Nmap to scan (default: $PORTS)
 
   --skip-netdiscover
       Skip optional netdiscover passive capture.
+
+  --netdiscover-secs N
+      Seconds to run netdiscover when enabled (default: $NETDISCOVER_SECS)
 
   --no-nuclei
       Skip Nuclei entirely (both HTTP and network templates).
       If nuclei is not installed, scans are also skipped with a warning.
 
-Manual VLAN options:
-  --vlan VLAN_ID
-      VLAN ID to scan.
-
-  --dhcp
-      Obtain an address via DHCP on the VLAN interface (default).
-
-  --static CIDR --gw GW
-      Use a static address (CIDR) and default gateway on the VLAN interface.
-
-Auto mode options:
-  --auto
-      Discover tagged VLANs passively and scan them.
-
+Auto mode:
   --secs N
-      Seconds to sniff VLAN tags in auto/vlans mode (default: \$SNIFF_SECS)
+      Seconds to sniff VLAN tags in auto/vlans mode (default: $SNIFF_SECS)
 
   --max-vlans N
-      Cap number of VLANs scanned in --auto (default: \$MAX_AUTO_VLANS)
+      Cap number of VLANs scanned in --auto (default: $MAX_AUTO_VLANS)
 
   --allow-vlans CSV
-      Only scan these VLAN IDs (strongly recommended).
+      Only scan/replay these VLAN IDs (strongly recommended).
 
   --include-native
-      Also scan the native/untagged network (DHCP on base interface).
+      Also scan/replay the native/untagged network (DHCP on base interface).
 
-Nuclei options:
+Nuclei options (HTTP scan):
   --nuclei-templates-dir DIR
-      Where nuclei templates are stored/updated (default: \$NUCLEI_TEMPLATES_DIR)
+      Where nuclei templates are stored/updated (default: $NUCLEI_TEMPLATES_DIR)
 
   --nuclei-rate N
   --nuclei-conc N
@@ -139,7 +143,6 @@ Nuclei options:
   --nuclei-severity CSV
   --nuclei-tags CSV
   --nuclei-exclude-tags CSV
-      Control Nuclei execution for the HTTP scan. (Network scan uses safe defaults in-code.)
 
 Examples:
   $NAME vlans --iface eth0 --secs 20
@@ -152,6 +155,10 @@ Examples:
 
   # Auto scan plus native/untagged (use with care)
   sudo $NAME run --auto --include-native --iface eth0 --secs 30 --allow-vlans 20,30,52
+
+  # Replay nuclei against saved targets from a prior run timestamp
+  sudo $NAME run --replay 20260129-161131
+  sudo $NAME run --allow-vlans 20 --replay 20260129-161131 --iface eth0
 
 Output files:
   targets/urls-*.txt
@@ -176,7 +183,6 @@ Notes:
   - For reporting, consume both JSONL files together.
 EOF
 }
-
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -364,9 +370,9 @@ run_native_phases_dhcp() {
   discover_hosts "$iface" "$hosts_file"
 
   if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
-    log "Optional: netdiscover passive capture (10s) on $iface"
-    timeout 10 netdiscover -i "$iface" -P -N 2>/dev/null \
-      > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
+    log "Optional: netdiscover passive capture (${NETDISCOVER_SECS}s) on $iface"
+    timeout "$NETDISCOVER_SECS" netdiscover -i "$iface" -P -N 2>/dev/null \
+     > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
   fi
 
   if [[ -s "$hosts_file" ]]; then
@@ -615,9 +621,9 @@ run_all_phases() {
 
   # Optional passive netdiscover (if present and not skipped)
   if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
-    log "Optional: netdiscover passive capture (10s) on $v_if"
-    timeout 10 netdiscover -i "$v_if" -P -N 2>/dev/null \
-      > "$WORKDIR/logs/netdiscover-${vlan}-${ts}.log" || true
+    log "Optional: netdiscover passive capture (${NETDISCOVER_SECS}s) on $iface"
+    timeout "$NETDISCOVER_SECS" netdiscover -i "$iface" -P -N 2>/dev/null \
+     > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
   fi
 
   # Phase 4-6
@@ -638,8 +644,13 @@ run_all_phases() {
   echo "  Nmap      : $nmap_xml"
   echo "  URLs      : $urls_file"
   echo "  Hostports : $hostports_file"
-  echo "  Nuclei    : $nuclei_out"
-  echo "  NucleiNet : $nuclei_net_out"
+  if nuclei_enabled; then
+    echo "  Nuclei    : $nuclei_out"
+    echo "  NucleiNet : $nuclei_net_out"
+  else
+    echo "  Nuclei    : (skipped)"
+    echo "  NucleiNet : (skipped)"
+  fi
 }
 
 run_auto() {
@@ -694,6 +705,136 @@ run_auto() {
   log "Auto mode complete."
 }
 
+run_replay_ts() {
+  local iface="$1"
+  local replay_ts="$2"
+  local allow_csv="$3"
+  local include_native="$4"
+  local mode="${5:-dhcp}"
+  local static_cidr="${6:-}"
+  local gw="${7:-}"
+
+  check_tools
+  ensure_dirs
+
+  [[ -n "$replay_ts" ]] || die "--replay requires a timestamp like 20260129-161131"
+  [[ "$replay_ts" =~ ^[0-9]{8}-[0-9]{6}$ ]] || warn "Replay TS '$replay_ts' doesn't match expected YYYYMMDD-HHMMSS; continuing."
+
+  # Find scopes on disk for this timestamp (native and/or VLAN IDs)
+  local scopes
+  scopes="$(list_replay_scopes "$replay_ts" || true)"
+
+  if [[ -z "$scopes" ]]; then
+    die "No replay target files found for TS=$replay_ts under $WORKDIR/targets (expected urls-*-TS.txt)."
+  fi
+
+  log "Replay mode: using existing target lists for TS=$replay_ts"
+  if [[ -n "$allow_csv" ]]; then
+    log "Replay allowlist (VLANs only): $allow_csv"
+  fi
+  if [[ "$include_native" -eq 1 ]]; then
+    log "Replay will include native/untagged scope if present."
+  fi
+
+  local now
+  now="$(date +%Y%m%d-%H%M%S)"
+
+  while read -r scope; do
+    [[ -n "$scope" ]] || continue
+
+    # Apply allowlist for VLAN scopes (numeric only). Native is controlled by --include-native.
+    if [[ "$scope" == "native" ]]; then
+      [[ "$include_native" -eq 1 ]] || continue
+    else
+      # Only keep numeric VLAN scopes
+      [[ "$scope" =~ ^[0-9]+$ ]] || continue
+      if [[ -n "$allow_csv" ]]; then
+        if ! echo "$scope" | filter_allowlist "$allow_csv" | grep -qx "$scope"; then
+          continue
+        fi
+      fi
+    fi
+
+    local urls_file hostports_file
+    urls_file="$WORKDIR/targets/urls-${scope}-${replay_ts}.txt"
+    hostports_file="$WORKDIR/targets/hostports-${scope}-${replay_ts}.txt"
+
+    if [[ ! -s "$urls_file" && ! -s "$hostports_file" ]]; then
+      warn "Replay: targets missing/empty for scope=$scope TS=$replay_ts; skipping."
+      continue
+    fi
+
+    if [[ "$scope" == "native" ]]; then
+      warn "Replay(native): requesting DHCP on base interface $iface (this can change host routing)."
+      command -v dhclient >/dev/null || die "dhclient required for native replay"
+      dhclient -v "$iface" || die "DHCP failed on native interface $iface"
+
+      local out_http out_net
+      out_http="$WORKDIR/reports/nuclei-replay-native-${replay_ts}-${now}.jsonl"
+      out_net="$WORKDIR/reports/nuclei-network-replay-native-${replay_ts}-${now}.jsonl"
+
+      run_nuclei "$urls_file" "$out_http"
+      run_nuclei_network "$hostports_file" "$out_net"
+
+      log "Replay(native) artifacts:"
+      echo "  URLs      : $urls_file"
+      echo "  Hostports : $hostports_file"
+      if nuclei_enabled; then
+        echo "  Nuclei    : $out_http"
+        echo "  NucleiNet : $out_net"
+      else
+        echo "  Nuclei    : (skipped)"
+        echo "  NucleiNet : (skipped)"
+      fi
+      echo
+      continue
+    fi
+
+    # VLAN replay (DHCP only)
+    log "=== Replay VLAN $scope (TS=$replay_ts) ==="
+    local v_if=""
+    if [[ "$mode" == "static" ]]; then
+      v_if="$(bring_up_vlan_static "$iface" "$scope" "$static_cidr" "$gw")"
+    else
+      v_if="$(bring_up_vlan_dhcp "$iface" "$scope")"
+    fi
+
+    local out_http out_net
+    out_http="$WORKDIR/reports/nuclei-replay-${scope}-${replay_ts}-${now}.jsonl"
+    out_net="$WORKDIR/reports/nuclei-network-replay-${scope}-${replay_ts}-${now}.jsonl"
+
+    run_nuclei "$urls_file" "$out_http"
+    run_nuclei_network "$hostports_file" "$out_net"
+
+    teardown_vlan "$v_if"
+
+    log "Replay(VLAN $scope) artifacts:"
+    echo "  VLAN      : $scope ($v_if on $iface)"
+    echo "  URLs      : $urls_file"
+    echo "  Hostports : $hostports_file"
+    if nuclei_enabled; then
+      echo "  Nuclei    : $out_http"
+      echo "  NucleiNet : $out_net"
+    else
+      echo "  Nuclei    : (skipped)"
+      echo "  NucleiNet : (skipped)"
+    fi
+    echo
+  done <<< "$scopes"
+
+  log "Replay complete."
+}
+
+list_replay_scopes() {
+  local ts="$1"
+  local f
+  shopt -s nullglob
+  for f in "$WORKDIR/targets"/urls-*-"$ts".txt; do
+    basename "$f" | sed -E "s/^urls-([^-]+)-${ts}\.txt$/\1/"
+  done | sort -u
+  shopt -u nullglob
+}
+
 # ----- Argument parsing -----
 cmd="${1:-}"
 shift || true
@@ -733,6 +874,8 @@ case "$cmd" in
     local_secs="$SNIFF_SECS"
     local_max_vlans="$MAX_AUTO_VLANS"
 
+    replay_ts=""
+
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --iface) local_iface="$2"; shift 2 ;;
@@ -750,6 +893,9 @@ case "$cmd" in
         --secs|--sniff-secs) local_secs="$2"; shift 2 ;;
         --max-vlans) local_max_vlans="$2"; shift 2 ;;
 
+        # replay mode (use existing targets from a prior run timestamp)
+        --replay) replay_ts="$2"; shift 2 ;;
+
         # general overrides
         --workdir) WORKDIR="$2"; shift 2 ;;
         --ports) PORTS="$2"; shift 2 ;;
@@ -763,10 +909,25 @@ case "$cmd" in
         --nuclei-tags) NUCLEI_TAGS="$2"; shift 2 ;;
         --nuclei-exclude-tags) NUCLEI_EXCLUDE_TAGS="$2"; shift 2 ;;
 
+        --netdiscover-secs) NETDISCOVER_SECS="$2"; shift 2 ;;
         --skip-netdiscover) skip_netdiscover=1; shift ;;
         *) die "Unknown argument: $1" ;;
       esac
     done
+
+    # Replay mode (skip discovery/nmap; run nuclei against saved target lists for a prior timestamp)
+    if [[ -n "$replay_ts" ]]; then
+      [[ -z "$vlan_id" ]] || die "--replay cannot be combined with --vlan (it replays saved scopes)"
+      [[ "$auto" -eq 0 ]] || die "--replay cannot be combined with --auto"
+
+      if [[ "$mode" == "static" ]]; then
+        [[ -n "$static_cidr" ]] || die "--static requires CIDR"
+        [[ -n "$gw" ]] || die "--gw required with --static"
+      fi
+
+      run_replay_ts "$local_iface" "$replay_ts" "$allow_vlans" "$include_native" "$mode" "$static_cidr" "$gw"
+      exit 0
+    fi
 
     # Auto mode
     if [[ "$auto" -eq 1 ]]; then
