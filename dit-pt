@@ -106,10 +106,30 @@ Env overrides:
   NUCLEI_RATE, NUCLEI_CONC, NUCLEI_TIMEOUT, NUCLEI_RETRIES
   NUCLEI_SEV, NUCLEI_TAGS, NUCLEI_EXCLUDE_TAGS
 
+Output files:
+  targets/urls-*.txt
+      HTTP(S) endpoints derived from Nmap
+
+  targets/hostports-*.txt
+      Non-HTTP services (e.g., 21/22/23)
+
+  reports/nuclei-*.jsonl
+      Web vulnerability findings
+
+  reports/nuclei-network-*.jsonl
+      Network/service discovery findings
+
 Notes:
-  - VLAN detection is passive.
-  - Joining a VLAN + scanning is active. Only do so with authorization.
-  - For K-12, prefer --allow-vlans in --auto mode to avoid scanning unintended VLANs.
+  - VLAN discovery is passive.
+  - Joining a VLAN and scanning is active — only do so with authorization.
+  - Two Nuclei scans are performed:
+      1) HTTP(S) scan against web ports (80/443/etc)
+      2) Network scan against non-HTTP services (FTP/SSH/Telnet)
+  - Network scans are passive and do NOT attempt authentication.
+  - Results are written to:
+      * nuclei-<scope>.jsonl        (HTTP findings)
+      * nuclei-network-<scope>.jsonl (network/service findings)
+  - For reporting, both files should be consumed together.
 EOF
 }
 
