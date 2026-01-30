@@ -25,6 +25,12 @@ NUCLEI_TEMPLATES_DIR="${NUCLEI_TEMPLATES_DIR:-$WORKDIR/nuclei-templates}"
 # Web/admin-ish ports commonly found in K-12 environments
 PORTS="${PORTS:-21,22,23,80,443,8000,8080,8443,8888,9000,9090,9443}"
 
+# Split PORTS into protocol-specific target sets
+# - WEB_PORTS are converted to http(s)://IP:PORT for HTTP nuclei templates
+# - NET_PORTS are emitted as IP:PORT for nuclei network templates (no http scheme)
+WEB_PORTS="${WEB_PORTS:-80,443,8000,8080,8443,8888,9000,9090,9443}"
+NET_PORTS="${NET_PORTS:-21,22,23}"
+
 # Nuclei knobs (safe-ish)
 NUCLEI_RATE="${NUCLEI_RATE:-50}"
 NUCLEI_CONC="${NUCLEI_CONC:-10}"
@@ -33,6 +39,11 @@ NUCLEI_RETRIES="${NUCLEI_RETRIES:-1}"
 NUCLEI_SEV="${NUCLEI_SEV:-info,low,medium}"
 NUCLEI_TAGS="${NUCLEI_TAGS:-exposure,misconfig,ssl,tech}"
 NUCLEI_EXCLUDE_TAGS="${NUCLEI_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive}"
+
+# Network nuclei knobs (passive-ish defaults)
+# These aim to stay "passive-first": banner/protocol discovery, not credential attempts.
+NUCLEI_NET_TAGS="${NUCLEI_NET_TAGS:-network,discovery,info}"
+NUCLEI_NET_EXCLUDE_TAGS="${NUCLEI_NET_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive,credentials,credential,login,auth,default,default-login}"
 
 # Tools (must exist)
 REQUIRED_TOOLS=(ip awk sort uniq grep sed date mkdir rm mktemp wc tr timeout head uname)
@@ -272,12 +283,14 @@ run_native_phases_dhcp() {
 
   ensure_dirs
 
-  local ts hosts_file nmap_xml urls_file nuclei_out
+  local ts hosts_file nmap_xml urls_file hostports_file nuclei_out nuclei_net_out
   ts="$(date +%Y%m%d-%H%M%S)"
   hosts_file="$WORKDIR/targets/hosts-native-${ts}.txt"
   nmap_xml="$WORKDIR/nmap/nmap-native-${ts}.xml"
   urls_file="$WORKDIR/targets/urls-native-${ts}.txt"
+  hostports_file="$WORKDIR/targets/hostports-native-${ts}.txt"
   nuclei_out="$WORKDIR/reports/nuclei-native-${ts}.jsonl"
+  nuclei_net_out="$WORKDIR/reports/nuclei-network-native-${ts}.jsonl"
 
   warn "Native scan: requesting DHCP on base interface $iface (this can change host routing)."
   dhclient -v "$iface" || die "DHCP failed on native interface $iface"
@@ -294,16 +307,20 @@ run_native_phases_dhcp() {
   if [[ -s "$hosts_file" ]]; then
     nmap_scan_hosts "$hosts_file" "$nmap_xml"
     build_urls_from_nmap_xml "$nmap_xml" "$urls_file"
+    build_hostports_from_nmap_xml "$nmap_xml" "$hostports_file"
     run_nuclei "$urls_file" "$nuclei_out"
+    run_nuclei_network "$hostports_file" "$nuclei_net_out"
   else
     warn "No hosts discovered on native; skipping nmap/nuclei."
   fi
 
   log "Native scan artifacts:"
-  echo "  Hosts : $hosts_file"
-  echo "  Nmap  : $nmap_xml"
-  echo "  URLs  : $urls_file"
-  echo "  Nuclei: $nuclei_out"
+  echo "  Hosts     : $hosts_file"
+  echo "  Nmap      : $nmap_xml"
+  echo "  URLs      : $urls_file"
+  echo "  Hostports : $hostports_file"
+  echo "  Nuclei    : $nuclei_out"
+  echo "  NucleiNet : $nuclei_net_out"
 }
 
 # ----- Phase 3: Host discovery -----
@@ -344,11 +361,15 @@ nmap_scan_hosts() {
 build_urls_from_nmap_xml() {
   local nmap_xml="$1"
   local urls_out="$2"
+  local web_ports_csv="${3:-$WEB_PORTS}"
   : > "$urls_out"
 
-  log "Phase 5: Building URL list from Nmap XML"
+  log "Phase 5: Building URL list from Nmap XML (web ports: $web_ports_csv)"
 
-  awk '
+  local web_re
+  web_re="^($(echo "$web_ports_csv" | tr ',' '|'))$"
+
+  awk -v web_re="$web_re" '
     function emit(ip, port) {
       if (port=="443" || port=="8443" || port=="9443") {
         printf "https://%s:%s\n", ip, port
@@ -364,11 +385,39 @@ build_urls_from_nmap_xml() {
       if (match($0, /portid="([0-9]+)"/, m)) port=m[1]
     }
     /<state state="open"/ {
-      if (ip != "" && port != "") emit(ip, port)
+      if (ip != "" && port != "" && port ~ web_re) emit(ip, port)
     }
   ' "$nmap_xml" | sort -u > "$urls_out"
 
   log "URLs written: $urls_out ($(wc -l < "$urls_out" | tr -d ' ') entries)"
+}
+
+# ----- Phase 5b: Build host:port targets for Nuclei network templates -----
+build_hostports_from_nmap_xml() {
+  local nmap_xml="$1"
+  local hostports_out="$2"
+  local net_ports_csv="${3:-$NET_PORTS}"
+  : > "$hostports_out"
+
+  log "Phase 5b: Building host:port list from Nmap XML (net ports: $net_ports_csv)"
+
+  local net_re
+  net_re="^($(echo "$net_ports_csv" | tr ',' '|'))$"
+
+  awk -v net_re="$net_re" '
+    /<host>/ { ip=""; port=""; next }
+    /<address addr="/ {
+      if (match($0, /addr="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"/, m)) ip=m[1]
+    }
+    /<port protocol="tcp" portid="/ {
+      if (match($0, /portid="([0-9]+)"/, m)) port=m[1]
+    }
+    /<state state="open"/ {
+      if (ip != "" && port != "" && port ~ net_re) printf "%s:%s\n", ip, port
+    }
+  ' "$nmap_xml" | sort -u > "$hostports_out"
+
+  log "Hostports written: $hostports_out ($(wc -l < "$hostports_out" | tr -d ' ') entries)"
 }
 
 # ----- Phase 6: Nuclei (safe-ish) -----
@@ -408,6 +457,44 @@ run_nuclei() {
   log "Nuclei results saved: $out_jsonl"
 }
 
+# ----- Phase 6b: Nuclei network templates (passive-ish) -----
+run_nuclei_network() {
+  local hostports_file="$1"
+  local out_jsonl="$2"
+
+  command -v nuclei >/dev/null || die "nuclei required for nuclei phase."
+
+  if [[ ! -s "$hostports_file" ]]; then
+    warn "No host:port targets to scan; skipping nuclei network scan."
+    return 0
+  fi
+
+  mkdir -p "$NUCLEI_TEMPLATES_DIR"
+
+  # Ensure templates exist in our chosen directory
+  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
+    log "Nuclei templates not found; installing to $NUCLEI_TEMPLATES_DIR"
+    nuclei -update-templates -ut "$NUCLEI_TEMPLATES_DIR" >/dev/null 2>&1 || true
+  fi
+
+  if [[ ! -d "$NUCLEI_TEMPLATES_DIR/network" ]]; then
+    warn "No nuclei network templates found at $NUCLEI_TEMPLATES_DIR/network; skipping network scan."
+    return 0
+  fi
+
+  log "Phase 6b: Running nuclei network (templates=$NUCLEI_TEMPLATES_DIR/network, tags=$NUCLEI_NET_TAGS, exclude=$NUCLEI_NET_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
+  nuclei \
+    -l "$hostports_file" \
+    -t "$NUCLEI_TEMPLATES_DIR/network" \
+    -severity "$NUCLEI_SEV" \
+    -tags "$NUCLEI_NET_TAGS" \
+    -exclude-tags "$NUCLEI_NET_EXCLUDE_TAGS" \
+    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
+    -jsonl -o "$out_jsonl" || true
+
+  log "Nuclei network results saved: $out_jsonl"
+}
+
 # ----- Main run command -----
 run_all_phases() {
   local iface="$1" vlan="$2" mode="$3" static_cidr="${4:-}" gw="${5:-}" skip_netdiscover="${6:-0}"
@@ -415,7 +502,7 @@ run_all_phases() {
   check_tools
   ensure_dirs
 
-  local ts v_if hosts_file nmap_xml urls_file nuclei_out
+  local ts v_if hosts_file nmap_xml urls_file hostports_file nuclei_out nuclei_net_out
   ts="$(date +%Y%m%d-%H%M%S)"
   v_if=""
 
@@ -424,7 +511,9 @@ run_all_phases() {
   hosts_file="$WORKDIR/targets/hosts-${vlan}-${ts}.txt"
   nmap_xml="$WORKDIR/nmap/nmap-${vlan}-${ts}.xml"
   urls_file="$WORKDIR/targets/urls-${vlan}-${ts}.txt"
+  hostports_file="$WORKDIR/targets/hostports-${vlan}-${ts}.txt"
   nuclei_out="$WORKDIR/reports/nuclei-${vlan}-${ts}.jsonl"
+  nuclei_net_out="$WORKDIR/reports/nuclei-network-${vlan}-${ts}.jsonl"
 
   # Phase 2: Join VLAN
   if [[ "$mode" == "dhcp" ]]; then
@@ -449,18 +538,22 @@ run_all_phases() {
   if [[ -s "$hosts_file" ]]; then
     nmap_scan_hosts "$hosts_file" "$nmap_xml"
     build_urls_from_nmap_xml "$nmap_xml" "$urls_file"
+    build_hostports_from_nmap_xml "$nmap_xml" "$hostports_file"
     run_nuclei "$urls_file" "$nuclei_out"
+    run_nuclei_network "$hostports_file" "$nuclei_net_out"
   else
     warn "No hosts discovered; skipping nmap/nuclei."
   fi
 
   log "Done."
   log "Artifacts:"
-  echo "  VLAN  : $vlan ($v_if on $iface)"
-  echo "  Hosts : $hosts_file"
-  echo "  Nmap  : $nmap_xml"
-  echo "  URLs  : $urls_file"
-  echo "  Nuclei: $nuclei_out"
+  echo "  VLAN      : $vlan ($v_if on $iface)"
+  echo "  Hosts     : $hosts_file"
+  echo "  Nmap      : $nmap_xml"
+  echo "  URLs      : $urls_file"
+  echo "  Hostports : $hostports_file"
+  echo "  Nuclei    : $nuclei_out"
+  echo "  NucleiNet : $nuclei_net_out"
 }
 
 run_auto() {
