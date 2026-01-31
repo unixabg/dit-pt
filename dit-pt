@@ -434,6 +434,7 @@ run_native_phases_dhcp() {
     log "Optional: netdiscover passive capture (${NETDISCOVER_SECS}s) on $iface"
     timeout "$NETDISCOVER_SECS" netdiscover -i "$iface" -P -N 2>/dev/null \
      > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
+    log "Netdiscover hosts observed: $(wc -l < "$WORKDIR/logs/netdiscover-native-${ts}.log" | tr -d ' ')"
   fi
 
   if [[ -s "$hosts_file" ]]; then
@@ -447,16 +448,21 @@ run_native_phases_dhcp() {
   fi
 
   log "Native scan artifacts:"
-  echo "  Hosts     : $hosts_file"
-  echo "  Nmap      : $nmap_xml"
-  echo "  URLs      : $urls_file"
-  echo "  Hostports : $hostports_file"
+  echo "  Hosts      : $hosts_file"
+  echo "  Nmap       : $nmap_xml"
+  echo "  URLs       : $urls_file"
+  echo "  Hostports  : $hostports_file"
+
+  if [[ -f "$WORKDIR/logs/netdiscover-native-${ts}.log" ]]; then
+    echo "  Netdiscover: $WORKDIR/logs/netdiscover-native-${ts}.log"
+  fi
+
   if nuclei_enabled; then
-    echo "  Nuclei    : $nuclei_out"
-    echo "  NucleiNet : $nuclei_net_out"
+    echo "  Nuclei     : $nuclei_out"
+    echo "  NucleiNet  : $nuclei_net_out"
   else
-    echo "  Nuclei    : (skipped)"
-    echo "  NucleiNet : (skipped)"
+    echo "  Nuclei     : (skipped)"
+    echo "  NucleiNet  : (skipped)"
   fi
 }
 
@@ -715,9 +721,10 @@ run_all_phases() {
 
   # Optional passive netdiscover (if present and not skipped)
   if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
-    log "Optional: netdiscover passive capture (${NETDISCOVER_SECS}s) on $iface"
-    timeout "$NETDISCOVER_SECS" netdiscover -i "$iface" -P -N 2>/dev/null \
-     > "$WORKDIR/logs/netdiscover-native-${ts}.log" || true
+    log "Optional: netdiscover passive capture (${NETDISCOVER_SECS}s) on $v_if"
+    timeout "$NETDISCOVER_SECS" netdiscover -i "$v_if" -P -N 2>/dev/null \
+     > "$WORKDIR/logs/netdiscover-${vlan}-${ts}.log" || true
+    log "Netdiscover hosts observed: $(wc -l < "$WORKDIR/logs/netdiscover-${vlan}-${ts}.log" | tr -d ' ')"
   fi
 
   # Phase 4-6
@@ -733,17 +740,22 @@ run_all_phases() {
 
   log "Done."
   log "Artifacts:"
-  echo "  VLAN      : $vlan ($v_if on $iface)"
-  echo "  Hosts     : $hosts_file"
-  echo "  Nmap      : $nmap_xml"
-  echo "  URLs      : $urls_file"
-  echo "  Hostports : $hostports_file"
+  echo "  VLAN       : $vlan ($v_if on $iface)"
+  echo "  Hosts      : $hosts_file"
+  echo "  Nmap       : $nmap_xml"
+  echo "  URLs       : $urls_file"
+  echo "  Hostports  : $hostports_file"
+
+  if [[ -f "$WORKDIR/logs/netdiscover-${vlan}-${ts}.log" ]]; then
+    echo "  Netdiscover: $WORKDIR/logs/netdiscover-${vlan}-${ts}.log"
+  fi
+
   if nuclei_enabled; then
-    echo "  Nuclei    : $nuclei_out"
-    echo "  NucleiNet : $nuclei_net_out"
+    echo "  Nuclei     : $nuclei_out"
+    echo "  NucleiNet  : $nuclei_net_out"
   else
-    echo "  Nuclei    : (skipped)"
-    echo "  NucleiNet : (skipped)"
+    echo "  Nuclei     : (skipped)"
+    echo "  NucleiNet  : (skipped)"
   fi
 }
 
@@ -871,14 +883,19 @@ run_replay_ts() {
       run_nuclei_network "$hostports_file" "$out_net"
 
       log "Replay(native) artifacts:"
-      echo "  URLs      : $urls_file"
-      echo "  Hostports : $hostports_file"
+      echo "  URLs       : $urls_file"
+      echo "  Hostports  : $hostports_file"
+
+      if [[ -f "$WORKDIR/logs/netdiscover-${scope:-native}-${replay_ts}.log" ]]; then
+        echo "  Netdiscover: $WORKDIR/logs/netdiscover-${scope:-native}-${replay_ts}.log"
+      fi
+
       if nuclei_enabled; then
-        echo "  Nuclei    : $out_http"
-        echo "  NucleiNet : $out_net"
+        echo "  Nuclei     : $out_http"
+        echo "  NucleiNet  : $out_net"
       else
-        echo "  Nuclei    : (skipped)"
-        echo "  NucleiNet : (skipped)"
+        echo "  Nuclei     : (skipped)"
+        echo "  NucleiNet  : (skipped)"
       fi
       echo
       continue
@@ -903,15 +920,19 @@ run_replay_ts() {
     teardown_vlan "$v_if"
 
     log "Replay(VLAN $scope) artifacts:"
-    echo "  VLAN      : $scope ($v_if on $iface)"
-    echo "  URLs      : $urls_file"
-    echo "  Hostports : $hostports_file"
+    echo "  VLAN       : $scope ($v_if on $iface)"
+    echo "  URLs       : $urls_file"
+    echo "  Hostports  : $hostports_file"
+
+    if [[ -f "$WORKDIR/logs/netdiscover-${scope:-native}-${replay_ts}.log" ]]; then
+      echo "  Netdiscover: $WORKDIR/logs/netdiscover-${scope:-native}-${replay_ts}.log"
+    fi
     if nuclei_enabled; then
-      echo "  Nuclei    : $out_http"
-      echo "  NucleiNet : $out_net"
+      echo "  Nuclei     : $out_http"
+      echo "  NucleiNet  : $out_net"
     else
-      echo "  Nuclei    : (skipped)"
-      echo "  NucleiNet : (skipped)"
+      echo "  Nuclei     : (skipped)"
+      echo "  NucleiNet  : (skipped)"
     fi
     echo
   done <<< "$scopes"
