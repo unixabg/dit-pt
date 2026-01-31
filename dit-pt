@@ -915,6 +915,11 @@ case "$cmd" in
       esac
     done
 
+    # Inform users that we ignore --include-native with --vlan param
+    if [[ -n "$vlan_id" && "$include_native" -eq 1 ]]; then
+      warn "--include-native is ignored when --vlan is specified. Use with --auto --allow-vlans #(s) "
+    fi
+
     # Replay mode (skip discovery/nmap; run nuclei against saved target lists for a prior timestamp)
     if [[ -n "$replay_ts" ]]; then
       [[ -z "$vlan_id" ]] || die "--replay cannot be combined with --vlan (it replays saved scopes)"
