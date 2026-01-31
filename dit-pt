@@ -475,7 +475,7 @@ discover_hosts() {
   if command -v arp-scan >/dev/null; then
     log "Phase 3: arp-scan discovery on $ifname"
     arp-scan -I "$ifname" -l 2>/dev/null \
-      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {print $1}' \
+      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print}' \
       | sort -u >> "$hosts_out" || true
   else
     warn "arp-scan not available; skipping active L2 host discovery"
@@ -492,10 +492,24 @@ nmap_scan_hosts() {
   command -v nmap >/dev/null || die "nmap required for scanning."
 
   log "Phase 4: Nmap scan (scoped ports: $PORTS)"
+
+  # hosts_file may contain full arp-scan lines (IP MAC Vendor). Nmap expects a pure list.
+  local ip_list
+  ip_list="$(mktemp)"
+  awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print $1}' "$hosts_file" | sort -u > "$ip_list" || true
+
+  if [[ ! -s "$ip_list" ]]; then
+    warn "No IPs found in $hosts_file; skipping Nmap."
+    rm -f "$ip_list"
+    return 0
+  fi
+
   nmap -Pn -sT -sV --version-light -T3 \
     -p "$PORTS" \
-    -iL "$hosts_file" \
+    -iL "$ip_list" \
     -oX "$out_xml" >/dev/null || true
+
+  rm -f "$ip_list"
 
   log "Nmap XML saved to: $out_xml"
 }
