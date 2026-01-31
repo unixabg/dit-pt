@@ -205,6 +205,67 @@ ensure_dirs() {
   mkdir -p "$WORKDIR"/{targets,scans,nmap,logs,reports}
 }
 
+# ----- Pre-flight functions aliave sanity -----
+# Pre-flight functions
+url_to_hostport() {
+  local u="$1"
+  local scheme rest hostport host port
+
+  scheme="${u%%://*}"
+  rest="${u#*://}"
+  hostport="${rest%%/*}"
+
+  if [[ "$hostport" == *:* ]]; then
+    host="${hostport%%:*}"
+    port="${hostport##*:}"
+  else
+    host="$hostport"
+    if [[ "$scheme" == "https" ]]; then port="443"; else port="80"; fi
+  fi
+
+  echo "$host:$port"
+}
+
+host_alive() {
+  local host="$1"
+  local port="$2"
+  timeout 2 bash -c "</dev/tcp/$host/$port" 2>/dev/null
+}
+
+filter_alive_urls() {
+  local in="$1"
+  local out="$2"
+
+  : > "$out"
+  while read -r url; do
+    [[ -n "$url" ]] || continue
+    local hp host port
+    hp="$(url_to_hostport "$url")"
+    host="${hp%%:*}"
+    port="${hp##*:}"
+    if host_alive "$host" "$port"; then
+      echo "$url" >> "$out"
+    fi
+  done < "$in"
+}
+
+filter_alive_hostports() {
+  local in="$1"
+  local out="$2"
+
+  : > "$out"
+  while read -r hp; do
+    [[ -n "$hp" ]] || continue
+    local host port
+    host="${hp%%:*}"
+    port="${hp##*:}"
+    if host_alive "$host" "$port"; then
+      echo "$hp" >> "$out"
+    fi
+  done < "$in"
+}
+
+
 # ----- Phase 1: Determine VLANs available (passive) -----
 discover_vlans() {
   local iface="$1"
@@ -516,6 +577,19 @@ run_nuclei() {
     return 0
   fi
 
+  # Pre-flight
+  local alive_urls
+  alive_urls="$(mktemp)"
+  filter_alive_urls "$urls_file" "$alive_urls"
+
+  if [[ ! -s "$alive_urls" ]]; then
+    warn "All URL targets appear unreachable; skipping nuclei."
+    rm -f "$alive_urls"
+    return 0
+  fi
+
+  log "Preflight URLs: $(wc -l < "$urls_file" | tr -d ' ') -> $(wc -l < "$alive_urls" | tr -d ' ') reachable"
+
   mkdir -p "$NUCLEI_TEMPLATES_DIR"
 
   # Ensure templates exist in our chosen directory
@@ -530,7 +604,7 @@ run_nuclei() {
 
   log "Phase 6: Running nuclei (templates=$NUCLEI_TEMPLATES_DIR, tags=$NUCLEI_TAGS, exclude=$NUCLEI_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
   nuclei \
-    -l "$urls_file" \
+    -l "$alive_urls" \
     -t "$NUCLEI_TEMPLATES_DIR" \
     -severity "$NUCLEI_SEV" \
     -tags "$NUCLEI_TAGS" \
@@ -539,6 +613,10 @@ run_nuclei() {
     -jsonl -o "$out_jsonl" || true
 
   log "Nuclei results saved: $out_jsonl"
+
+  # Cleanup pre-flight temp
+  rm -f "$alive_urls"
+
 }
 
 # ----- Phase 6b: Nuclei network templates (passive-ish) -----
@@ -561,6 +639,19 @@ run_nuclei_network() {
     return 0
   fi
 
+  # Pre-flight
+  local alive_hp
+  alive_hp="$(mktemp)"
+  filter_alive_hostports "$hostports_file" "$alive_hp"
+
+  if [[ ! -s "$alive_hp" ]]; then
+    warn "All host:port targets appear unreachable; skipping nuclei network."
+    rm -f "$alive_hp"
+    return 0
+  fi
+
+  log "Preflight hostports: $(wc -l < "$hostports_file" | tr -d ' ') -> $(wc -l < "$alive_hp" | tr -d ' ') reachable"
+
   mkdir -p "$NUCLEI_TEMPLATES_DIR"
 
   # Ensure templates exist in our chosen directory
@@ -576,7 +667,7 @@ run_nuclei_network() {
 
   log "Phase 6b: Running nuclei network (templates=$NUCLEI_TEMPLATES_DIR/network, tags=$NUCLEI_NET_TAGS, exclude=$NUCLEI_NET_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
   nuclei \
-    -l "$hostports_file" \
+    -l "$alive_hp" \
     -t "$NUCLEI_TEMPLATES_DIR/network" \
     -severity "$NUCLEI_SEV" \
     -tags "$NUCLEI_NET_TAGS" \
@@ -585,6 +676,9 @@ run_nuclei_network() {
     -jsonl -o "$out_jsonl" || true
 
   log "Nuclei network results saved: $out_jsonl"
+
+  # Cleanup pre-flight temp
+  rm -f "$alive_hp"
 }
 
 # ----- Main run command -----
