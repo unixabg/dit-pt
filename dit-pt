@@ -50,7 +50,7 @@ NUCLEI_NET_EXCLUDE_TAGS="${NUCLEI_NET_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intru
 NO_NUCLEI="${NO_NUCLEI:-0}"
 
 # Tools (must exist)
-REQUIRED_TOOLS=(ip arp-scan awk sort uniq grep sed date mkdir rm mktemp wc tr timeout head uname)
+REQUIRED_TOOLS=(ip arp-scan gawk sort uniq grep sed date mkdir rm mktemp wc tr timeout head uname)
 OPTIONAL_TOOLS=(tcpdump netdiscover nmap nuclei dhclient)
 
 log()  { echo "[+] $*" >&2; }
