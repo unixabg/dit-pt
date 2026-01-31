@@ -49,7 +49,7 @@ It does **not**:
 - nmap
 - tcpdump
 - arp-scan
-- netdiscover
+- netdiscover (optional, recommended)
 - nuclei (optional, recommended)
 
 ---
