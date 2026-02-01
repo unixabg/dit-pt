@@ -100,8 +100,11 @@ jq -r '
   echo "# dit-pt Findings Report"
   echo
   echo "**Report Generator:** dit-pt-report v${REPORT_VERSION}"
+  echo
   echo "**Generated:** ${REPORT_GENERATED_AT}"
+  echo
   echo "**Source:** \`$IN\`"
+  echo
   if [[ -f "$HOSTS_FILE" ]]; then
     echo "**Host inventory:** \`$HOSTS_FILE\`"
   fi
