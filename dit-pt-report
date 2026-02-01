@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Report generator version
+REPORT_VERSION="1.4.0"
+REPORT_GENERATED_AT="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
 usage() {
   cat <<EOF
 dit-pt-report
@@ -8,13 +12,14 @@ dit-pt-report
 Generate reports from Nuclei JSONL output.
 
 Usage:
-  dit-pt-report --in FILE.jsonl [--out-dir DIR] [--prefix NAME]
+  dit-pt-report --in FILE.jsonl [--out-dir DIR] [--prefix NAME] [--hosts-file FILE]
 
 Options:
-  --in FILE.jsonl    Input nuclei JSONL file (required)
-  --out-dir DIR      Output directory (default: current dir)
-  --prefix NAME      Output filename prefix (default: input filename w/o .jsonl)
-  -h, --help         Show help
+  --in FILE.jsonl         Input nuclei JSONL file (required)
+  --out-dir DIR           Output directory (default: current dir)
+  --prefix NAME           Output filename prefix (default: input filename w/o .jsonl)
+  --hosts-file FILE       Optional: host inventory file with `ip mac vendor` (default: /var/lib/dit-pt/targets/hosts)
+  -h, --help              Show help
 EOF
 }
 
@@ -45,12 +50,14 @@ check_requirements() {
 IN=""
 OUT_DIR="."
 PREFIX=""
+HOSTS_FILE="/var/lib/dit-pt/targets/hosts"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --in) IN="$2"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --prefix) PREFIX="$2"; shift 2 ;;
+    --hosts-file) HOSTS_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1" ;;
   esac
@@ -92,20 +99,67 @@ jq -r '
 {
   echo "# dit-pt Findings Report"
   echo
+  echo "**Report Generator:** dit-pt-report v${REPORT_VERSION}"
+  echo "**Generated:** ${REPORT_GENERATED_AT}"
   echo "**Source:** \`$IN\`"
+  if [[ -f "$HOSTS_FILE" ]]; then
+    echo "**Host inventory:** \`$HOSTS_FILE\`"
+  fi
   echo
 
-  echo "## Summary by Severity"
-  jq -r '.info.severity // "unknown"' "$IN" | sort | uniq -c | sort -nr | \
-    awk '{printf "- **%s**: %s\n",$2,$1}'
-  echo
+echo "## Summary by Severity"
+# Show both total matches and unique templates per severity
+jq -r '
+  [
+    (.info.severity // "unknown"),
+    (."template-id" // "unknown-template")
+  ] | @tsv
+' "$IN"   | sort -t$'	' -k1,1 -k2,2   | awk -F'	' '
+    {
+      sev=$1; tid=$2
+      matches[sev]++
+      if (!seen[sev,tid]++) uniq[sev]++
+    }
+    END {
+      # Print in severity priority order when present
+      order[1]="critical"; order[2]="high"; order[3]="medium"; order[4]="low"; order[5]="info"; order[6]="unknown"
+      for (i=1;i<=6;i++){
+        s=order[i]
+        if (matches[s]>0) printf "- **%s**: %d match(es) (%d unique template(s))\n", s, matches[s], uniq[s]
+      }
+      # Print any other severities encountered
+      for (s in matches){
+        if (s!="critical" && s!="high" && s!="medium" && s!="low" && s!="info" && s!="unknown"){
+          printf "- **%s**: %d match(es) (%d unique template(s))\n", s, matches[s], uniq[s]
+        }
+      }
+    }
+  '
+echo
 
-  echo "## Top Hosts"
-  jq -r '.host // "unknown-host"' "$IN" | sort | uniq -c | sort -nr | head | \
-    awk '{printf "- `%s`: %s findings\n",$2,$1}'
-  echo
+echo "## Top Hosts"
+# Show both total matches and unique templates per host
+jq -r '
+  [
+    (.host // "unknown-host"),
+    (."template-id" // "unknown-template")
+  ] | @tsv
+' "$IN"   | sort -t$'	' -k1,1 -k2,2   | awk -F'	' '
+    {
+      h=$1; tid=$2
+      matches[h]++
+      if (!seen[h,tid]++) uniq[h]++
+    }
+    END {
+      for (h in matches) {
+        printf "%d	%d	%s\n", matches[h], uniq[h], h
+      }
+    }
+  '   | sort -nr -k1,1 -k2,2   | head   | awk -F'	' '{printf "- `%s`: %d match(es) (%d unique template(s))\n",$3,$1,$2}'
+echo
 
-  echo "## Findings by Host"
+echo "## Findings by Host"
+
   echo
 
   jq -r '
@@ -114,11 +168,40 @@ jq -r '
       (.info.severity // "unknown"),
       (."template-id" // "unknown-template"),
       (.info.name // "(no name)"),
-      (.url // .["matched-at"] // "")
+      (.url // .["matched-at"] // ""),
+      (.["matcher-name"] // "")
     ] | @tsv
   ' "$IN" \
   | sort \
-  | awk -F'\t' '
+  | awk -F'	' -v hostfile="$HOSTS_FILE" '
+  function trim(s){ sub(/^\s+/,"",s); sub(/\s+$/,"",s); return s }
+  function norm_host(h,   t) {
+    # Extract a comparable key (prefer bare IP/host without scheme/port/path)
+    t=h
+    sub(/^https?:\/\//,"",t)
+    sub(/\/.*$/,"",t)
+    sub(/^\[/,"",t)
+    sub(/\]$/,"",t)
+    split(t, a, ":")
+    return a[1]
+  }
+  function load_host_inventory(   line, ip) {
+    if (hostfile=="" ) return
+    # Accept lines like: "IP MAC VENDOR..."; keep the full line for display
+    while ((getline line < hostfile) > 0) {
+      line = trim(line)
+      if (line=="" || line ~ /^#/) continue
+      split(line, f, /[[:space:]]+/)
+      ip=f[1]
+      if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+        hostline[ip]=line
+      }
+    }
+    close(hostfile)
+  }
+
+  BEGIN { load_host_inventory() }
+
   function sev_icon(s) {
     if (s=="critical") return "🔥";
     if (s=="high")     return "❗";
@@ -135,12 +218,13 @@ jq -r '
   }
 
   {
-    host=$1; sev=$2; tid=$3; name=$4; url=$5;
+    host=$1; sev=$2; tid=$3; name=$4; url=$5; matcher=$6;
     key = host SUBSEP sev SUBSEP tid;
 
     hosts[host]=1;
     sev_seen[host,sev]=1;
     title[key]=name;
+    count[key]++;
 
     # Track worst (highest priority) severity per host for sorting hosts
     if (!(host in worst) || sev_rank(sev) < worst[host]) {
@@ -150,6 +234,12 @@ jq -r '
     if (url != "") {
       if (!(seen[key,url]++)) {
         urls[key] = urls[key] "\n  - " url;
+      }
+    }
+
+    if (matcher != "") {
+      if (!(seenm[key,matcher]++)) {
+        details[key] = details[key] "\n  - " matcher;
       }
     }
   }
@@ -186,6 +276,11 @@ jq -r '
 
       print "### 🖥️ " h "\n"
 
+      ipk = norm_host(h)
+      if (ipk in hostline) {
+        print "**Inventory:** `" hostline[ipk] "`\n"
+      }
+
       # Print severities in priority order
       for (order = 1; order <= 5; order++) {
         found = 0
@@ -207,7 +302,10 @@ jq -r '
             split(k, y, SUBSEP)
             if (y[1] != h || y[2] != sev) continue
 
-            printf "- **%s** (`%s`)\n", title[k], y[3]
+            printf "- **%s** (`%s`) — %d match(es)\n", title[k], y[3], count[k]
+            if (details[k] != "") {
+              print "  **Details:**" details[k] "\n"
+            }
             if (urls[k] != "") print urls[k]
             print ""
           }
