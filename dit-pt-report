@@ -117,7 +117,7 @@ jq -r '
     (.info.severity // "unknown"),
     (."template-id" // "unknown-template")
   ] | @tsv
-' "$IN"   | sort -t$'	' -k1,1 -k2,2   | awk -F'	' '
+' "$IN"   | sort -t$'	' -k1,1 -k2,2   | gawk -F'	' '
     {
       sev=$1; tid=$2
       matches[sev]++
@@ -147,7 +147,7 @@ jq -r '
     (.host // "unknown-host"),
     (."template-id" // "unknown-template")
   ] | @tsv
-' "$IN"   | sort -t$'	' -k1,1 -k2,2   | awk -F'	' '
+' "$IN"   | sort -t$'	' -k1,1 -k2,2   | gawk -F'	' '
     {
       h=$1; tid=$2
       matches[h]++
@@ -158,7 +158,7 @@ jq -r '
         printf "%d	%d	%s\n", matches[h], uniq[h], h
       }
     }
-  '   | sort -nr -k1,1 -k2,2   | head   | awk -F'	' '{printf "- `%s`: %d match(es) (%d unique template(s))\n",$3,$1,$2}'
+  '   | sort -nr -k1,1 -k2,2   | head   | gawk -F'	' '{printf "- `%s`: %d match(es) (%d unique template(s))\n",$3,$1,$2}'
 echo
 
 echo "## Findings by Host"
@@ -176,7 +176,7 @@ echo "## Findings by Host"
     ] | @tsv
   ' "$IN" \
   | sort \
-  | awk -F'	' -v hostfile="$HOSTS_FILE" '
+  | gawk -F'	' -v hostfile="$HOSTS_FILE" '
   function trim(s){ sub(/^\s+/,"",s); sub(/\s+$/,"",s); return s }
   function norm_host(h,   t) {
     # Extract a comparable key (prefer bare IP/host without scheme/port/path)

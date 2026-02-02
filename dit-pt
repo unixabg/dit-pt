@@ -278,10 +278,10 @@ discover_vlans() {
 
   timeout "${secs}" tcpdump -i "$iface" -e -n 'vlan' 2>/dev/null \
     | grep -oE 'vlan [0-9]+' \
-    | awk '{print $2}' \
+    | gawk '{print $2}' \
     | sort -n \
     | uniq -c \
-    | awk '{printf "VLAN %s (seen %s frames)\n",$2,$1}' \
+    | gawk '{printf "VLAN %s (seen %s frames)\n",$2,$1}' \
     || true
 
   if timeout "$secs" tcpdump -i "$iface" -e -n -c 1 'not vlan' >/dev/null 2>&1; then
@@ -299,7 +299,7 @@ discover_vlan_ids() {
 
   timeout "${secs}" tcpdump -i "$iface" -e -n 'vlan' 2>/dev/null \
     | grep -oE 'vlan [0-9]+' \
-    | awk '{print $2}' \
+    | gawk '{print $2}' \
     | sort -n \
     | uniq
 }
@@ -475,7 +475,7 @@ discover_hosts() {
   if command -v arp-scan >/dev/null; then
     log "Phase 3: arp-scan discovery on $ifname"
     arp-scan -I "$ifname" -l 2>/dev/null \
-      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print}' \
+      | gawk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print}' \
       | sort -u >> "$hosts_out" || true
   else
     warn "arp-scan not available; skipping active L2 host discovery"
@@ -496,7 +496,7 @@ nmap_scan_hosts() {
   # hosts_file may contain full arp-scan lines (IP MAC Vendor). Nmap expects a pure list.
   local ip_list
   ip_list="$(mktemp)"
-  awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print $1}' "$hosts_file" | sort -u > "$ip_list" || true
+  gawk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print $1}' "$hosts_file" | sort -u > "$ip_list" || true
 
   if [[ ! -s "$ip_list" ]]; then
     warn "No IPs found in $hosts_file; skipping Nmap."
@@ -526,7 +526,7 @@ build_urls_from_nmap_xml() {
   local web_re
   web_re="^($(echo "$web_ports_csv" | tr ',' '|'))$"
 
-  awk -v web_re="$web_re" '
+  gawk -v web_re="$web_re" '
     function emit(ip, port) {
       if (port=="443" || port=="8443" || port=="9443") {
         printf "https://%s:%s\n", ip, port
@@ -561,7 +561,7 @@ build_hostports_from_nmap_xml() {
   local net_re
   net_re="^($(echo "$net_ports_csv" | tr ',' '|'))$"
 
-  awk -v net_re="$net_re" '
+  gawk -v net_re="$net_re" '
     /<host>/ { ip=""; port=""; next }
     /<address addr="/ {
       if (match($0, /addr="([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"/, m)) ip=m[1]
