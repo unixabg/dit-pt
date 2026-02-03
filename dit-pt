@@ -397,13 +397,20 @@ bring_up_vlan_static() {
 
 teardown_vlan() {
   local v_if="$1"
-  if [[ -n "$v_if" ]]; then
-    log "Tearing down $v_if"
-    if command -v dhclient >/dev/null; then
-      dhclient -r "$v_if" >/dev/null 2>&1 || true
-    fi
-    ip link del "$v_if" >/dev/null 2>&1 || true
+  [[ -n "$v_if" ]] || return 0
+
+  # Only two types to teardown dit or d
+  if ip link show dev "dit$v_if" >/dev/null 2>&1; then
+    v_if="dit$v_if"
+  else
+    v_if="d$v_if"
   fi
+  log "Tearing down $v_if"
+  if command -v dhclient >/dev/null; then
+    dhclient -r "$v_if" >/dev/null 2>&1 || true
+  fi
+  ip link del "$v_if" >/dev/null 2>&1 || true
+
 }
 
 # Native/untagged scan helper (DHCP on base interface)
@@ -814,6 +821,7 @@ run_auto() {
     log "=== Auto scan VLAN $v ==="
     run_all_phases "$iface" "$v" "dhcp" "" "" "$skip_netdiscover"
     echo
+    teardown_vlan "$v"
   done <<< "$vlans"
 
   # Native scan last (optional)
