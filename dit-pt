@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x
 
 # dit-pt: Defensive Infrastructure Testing — Passive-first Testing & Network Assessment
 # Phases:
@@ -74,6 +75,7 @@ Usage:
   $NAME run --vlan VLAN_ID [--iface IFACE] [--dhcp | --static CIDR --gw GW]
       [--skip-netdiscover] [--no-nuclei]
       [--netdiscover-secs N]
+      [--target IP]
       [--workdir DIR] [--ports CSV]
       [--nuclei-templates-dir DIR]
       [--nuclei-rate N] [--nuclei-conc N] [--nuclei-timeout S] [--nuclei-retries N]
@@ -118,6 +120,9 @@ Options:
   --no-nuclei
       Skip Nuclei entirely (both HTTP and network templates).
       If nuclei is not installed, scans are also skipped with a warning.
+
+  --target IP
+      Scan only this specific IP (skips arp-scan discovery).
 
 Auto mode:
   --secs N
@@ -503,7 +508,7 @@ nmap_scan_hosts() {
   # hosts_file may contain full arp-scan lines (IP MAC Vendor). Nmap expects a pure list.
   local ip_list
   ip_list="$(mktemp)"
-  gawk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+[[:space:]]/ {print $1}' "$hosts_file" | sort -u > "$ip_list" || true
+  gawk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {print $1}' "$hosts_file" | sort -u > "$ip_list" || true
 
   if [[ ! -s "$ip_list" ]]; then
     warn "No IPs found in $hosts_file; skipping Nmap."
@@ -710,7 +715,7 @@ run_nuclei_network() {
 
 # ----- Main run command -----
 run_all_phases() {
-  local iface="$1" vlan="$2" mode="$3" static_cidr="${4:-}" gw="${5:-}" skip_netdiscover="${6:-0}"
+  local iface="$1" vlan="$2" mode="$3" static_cidr="${4:-}" gw="${5:-}" skip_netdiscover="${6:-0}" target_ip="${7:-}"
 
   check_tools
   ensure_dirs
@@ -738,7 +743,12 @@ run_all_phases() {
   fi
 
   # Phase 3: discovery
-  discover_hosts "$v_if" "$hosts_file"
+  if [[ -n "$target_ip" ]]; then
+    log "Target specified: $target_ip (skipping arp-scan discovery)"
+    echo "$target_ip" > "$hosts_file"
+  else
+    discover_hosts "$v_if" "$hosts_file"
+  fi
 
   # Optional passive netdiscover (if present and not skipped)
   if [[ "$skip_netdiscover" -eq 0 ]] && command -v netdiscover >/dev/null; then
@@ -1002,6 +1012,7 @@ case "$cmd" in
     vlan_id=""
     mode="dhcp"
     static_cidr=""
+    target_ip=""
     gw=""
     skip_netdiscover=0
 
@@ -1021,6 +1032,7 @@ case "$cmd" in
         --vlan) vlan_id="$2"; shift 2 ;;
         --dhcp) mode="dhcp"; shift ;;
         --static) mode="static"; static_cidr="$2"; shift 2 ;;
+        --target) target_ip="$2"; shift 2 ;;
         --gw) gw="$2"; shift 2 ;;
 
         # auto mode
@@ -1057,6 +1069,12 @@ case "$cmd" in
       warn "--include-native is ignored when --vlan is specified. Use with --auto --allow-vlans #(s) "
     fi
 
+    if [[ -n "$target_ip" ]]; then
+      [[ "$target_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "--target must be an IPv4 address"
+      [[ -z "$replay_ts" ]] || die "--target cannot be combined with --replay"
+      [[ "$auto" -eq 0 ]] || die "--target cannot be combined with --auto"
+    fi
+
     # Replay mode (skip discovery/nmap; run nuclei against saved target lists for a prior timestamp)
     if [[ -n "$replay_ts" ]]; then
       [[ -z "$vlan_id" ]] || die "--replay cannot be combined with --vlan (it replays saved scopes)"
@@ -1083,11 +1101,12 @@ case "$cmd" in
     [[ "$vlan_id" =~ ^[0-9]+$ ]] || die "VLAN must be numeric"
 
     if [[ "$mode" == "dhcp" ]]; then
-      run_all_phases "$local_iface" "$vlan_id" "dhcp" "" "" "$skip_netdiscover"
+      run_all_phases "$local_iface" "$vlan_id" "dhcp" "" "" "$skip_netdiscover" "$target_ip"
     else
       [[ -n "$static_cidr" ]] || die "--static requires CIDR"
       [[ -n "$gw" ]] || die "--gw required with --static"
-      run_all_phases "$local_iface" "$vlan_id" "static" "$static_cidr" "$gw" "$skip_netdiscover"
+      run_all_phases "$local_iface" "$vlan_id" "static" "$static_cidr" "$gw" "$skip_netdiscover" "$target_ip"
+
     fi
     ;;
 
