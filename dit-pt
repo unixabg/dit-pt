@@ -394,6 +394,7 @@ bring_up_vlan_static() {
   ip addr flush dev "$v_if" || true
   ip addr add "$cidr" dev "$v_if"
 
+  warn "Replacing default route with $gw via $v_if — this will affect all outbound traffic on this host."
   log "Setting default gateway $gw via $v_if"
   ip route replace default via "$gw" dev "$v_if"
 
