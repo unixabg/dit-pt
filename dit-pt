@@ -724,7 +724,7 @@ run_all_phases() {
   ts="$(date +%Y%m%d-%H%M%S)"
   v_if=""
 
-  trap '[[ -n "${v_if:-}" ]] && teardown_vlan "$v_if"' EXIT
+  trap '[[ -n "${vlan:-}" ]] && teardown_vlan "$vlan"' EXIT
 
   hosts_file="$WORKDIR/targets/hosts-${vlan}-${ts}.txt"
   nmap_xml="$WORKDIR/nmap/nmap-${vlan}-${ts}.xml"
