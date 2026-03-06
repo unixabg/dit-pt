@@ -81,6 +81,7 @@ echo "[*] Generating report from $IN"
 # --------------------
 # CSV OUTPUT
 # --------------------
+echo '"timestamp","host","url","severity","template-id","name","matcher"' > "$CSV_OUT"
 jq -r '
   [
     (.timestamp // ""),
@@ -91,7 +92,7 @@ jq -r '
     (.info.name // "(no name)"),
     (.["matcher-name"] // "")
   ] | @csv
-' "$IN" > "$CSV_OUT"
+' "$IN" >> "$CSV_OUT"
 
 # --------------------
 # MARKDOWN REPORT
