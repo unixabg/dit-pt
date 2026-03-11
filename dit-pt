@@ -41,6 +41,7 @@ NUCLEI_RETRIES="${NUCLEI_RETRIES:-1}"
 NUCLEI_SEV="${NUCLEI_SEV:-info,low,medium}"
 NUCLEI_TAGS="${NUCLEI_TAGS:-exposure,misconfig,ssl,tech}"
 NUCLEI_EXCLUDE_TAGS="${NUCLEI_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive}"
+NUCLEI_RH="${NUCLEI_RH:-10}"
 
 # Network nuclei knobs (passive-ish defaults)
 # These aim to stay "passive-first": banner/protocol discovery, not credential attempts.
@@ -643,6 +644,7 @@ run_nuclei() {
     -tags "$NUCLEI_TAGS" \
     -exclude-tags "$NUCLEI_EXCLUDE_TAGS" \
     -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
+    -rh "$NUCLEI_RH" \
     -jsonl -o "$out_jsonl" || true
 
   log "Nuclei results saved: $out_jsonl"
@@ -706,6 +708,7 @@ run_nuclei_network() {
     -tags "$NUCLEI_NET_TAGS" \
     -exclude-tags "$NUCLEI_NET_EXCLUDE_TAGS" \
     -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
+    -rh "$NUCLEI_RH" \
     -jsonl -o "$out_jsonl" || true
 
   log "Nuclei network results saved: $out_jsonl"
