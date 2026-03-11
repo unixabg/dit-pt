@@ -1,0 +1,249 @@
+# dit-pt-cheatsheet.txt
+# Last updated: March 2026
+# Purpose: realistic command-line examples for different risk profiles
+#          when using dit-pt + nuclei
+#
+# IMPORTANT RULES FOR ALL EXAMPLES:
+#   1. ALWAYS use --allow-vlans or --target to limit scope
+#   2. Never run broad auto scans without explicit authorization
+#   3. --no-nuclei is strongly recommended on first pass of unknown networks
+#   4. Adjust --nuclei-rate / --nuclei-conc to match network fragility
+#   5. Embedded devices (printers, IoT, cameras, cheap switches) can crash
+#      under even modest nuclei load — see FRAGILE NETWORK section below
+#   6. -rh (per-host request cap) is hardcoded to 10 in dit-pt (NUCLEI_RH=10)
+#      Override via environment: sudo NUCLEI_RH=5 ./dit-pt run ...
+
+#===============================================================================
+# PHASE 0: VLAN DISCOVERY (always start here on a trunk port)
+#===============================================================================
+
+# Passive sniff — see what VLANs are talking (no join, no scan)
+sudo ./dit-pt vlans --iface eth0 --secs 30
+
+# Longer window for quieter VLANs
+sudo ./dit-pt vlans --iface eth0 --secs 90
+
+#===============================================================================
+# PHASE 1: DISCOVERY ONLY (trunk port workflow — no nuclei)
+# Use this first to get a lay of the land before any active scanning.
+# Safe to run on unknown networks. Produces hosts + nmap XML only.
+#===============================================================================
+
+# Auto — scan observed VLANs, no nuclei, no netdiscover
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30,50,100 \
+  --max-vlans 10 \
+  --secs 40 \
+  --no-nuclei \
+  --skip-netdiscover
+
+# Auto — include native/untagged VLAN as well (DHCP on base iface — affects routing)
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30,50,100 \
+  --include-native \
+  --max-vlans 10 \
+  --secs 40 \
+  --no-nuclei \
+  --skip-netdiscover
+
+# Single VLAN — discovery + nmap only
+sudo ./dit-pt run --vlan 30 --iface eth0 --dhcp \
+  --no-nuclei
+
+# Single known target — just nmap, no arp-scan
+sudo ./dit-pt run --vlan 30 --iface eth0 --dhcp \
+  --target 10.30.0.47 \
+  --no-nuclei
+
+#===============================================================================
+# BLUE TEAM / AUDIT / LOW-NOISE / COMPLIANCE STYLE
+# Run nuclei only after reviewing discovery output.
+# Use --replay to re-run nuclei against saved targets without re-doing discovery.
+#===============================================================================
+
+# 1. Very conservative — info/low/medium only, small footprint
+#    Good for: compliance audits, first nuclei pass on a known network
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30,50,100 \
+  --max-vlans 6 \
+  --secs 40 \
+  --nuclei-severity info,low,medium \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,credentials,default-login,auth \
+  --nuclei-rate 25 --nuclei-conc 5 --nuclei-retries 0 \
+  --skip-netdiscover
+
+# 2. Blue + native VLAN (extra care — replaces default route on host)
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30 \
+  --max-vlans 5 \
+  --include-native \
+  --nuclei-severity info,low,medium \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,credentials,default-login,auth \
+  --nuclei-rate 30 --nuclei-conc 6 --nuclei-timeout 9
+
+# 3. Single VLAN — audit focused, minimal severity
+sudo ./dit-pt run --vlan 40 --iface eth0 --dhcp \
+  --nuclei-severity info,low \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,high,critical,vuln,default \
+  --nuclei-rate 20 --nuclei-conc 4
+
+# 4. Replay prior discovery with nuclei (no re-scan, no DHCP churn)
+#    Use the timestamp from a previous --no-nuclei run
+sudo ./dit-pt run --replay 20260306-091500 \
+  --allow-vlans 10,20,30 \
+  --nuclei-severity info,low,medium \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,credentials,default-login,auth \
+  --nuclei-rate 25 --nuclei-conc 5 --nuclei-retries 0
+
+#===============================================================================
+# FRAGILE NETWORK STYLE
+# Use when the network has embedded devices: printers, IoT, IP cameras,
+# cheap managed switches, VoIP phones, HVAC controllers, etc.
+# These devices can crash or require reboot under normal nuclei load.
+# -rh caps requests per host regardless of overall rate.
+#===============================================================================
+
+# NOTE: -rh 10 is hardcoded in dit-pt. Override with: sudo NUCLEI_RH=5 ./dit-pt run ...
+
+# 1. Very gentle — low rate, tech/exposure only
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30 \
+  --max-vlans 6 \
+  --secs 40 \
+  --nuclei-severity info,low,medium \
+  --nuclei-tags tech,exposure,ssl,misconfig \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,credentials,default-login,auth,vuln \
+  --nuclei-rate 15 --nuclei-conc 3 --nuclei-retries 0 \
+  --skip-netdiscover
+
+# 2. Single fragile device — very quiet fingerprint only
+sudo ./dit-pt run --vlan 30 --iface eth0 --dhcp \
+  --target 10.30.0.47 \
+  --nuclei-severity info,low \
+  --nuclei-tags tech,exposure,ssl \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,credentials,default-login,auth,vuln \
+  --nuclei-rate 10 --nuclei-conc 2 --nuclei-timeout 3 --nuclei-retries 0
+
+# NOTE: For mixed networks (some robust servers, some fragile IoT):
+#   1. Run --no-nuclei first to identify all hosts
+#   2. Manually identify which IPs look like servers vs embedded devices
+#   3. Re-run with --target against only the robust hosts
+#   4. Use the fragile preset above for embedded devices if nuclei is needed
+
+#===============================================================================
+# RED TEAM / AUTHORIZED PENTEST / BROADER COVERAGE STYLE
+# Only use with explicit written authorization.
+#===============================================================================
+
+# 1. Standard authorized red-team scan — balanced aggression
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 100,200,300,400,500,600 \
+  --max-vlans 10 \
+  --secs 90 \
+  --nuclei-severity info,low,medium,high,critical \
+  --nuclei-tags exposure,misconfig,ssl,tech,vuln,cve,default-login,fileread,xxe,network \
+  --nuclei-exclude-tags brute,fuzz,dos,intrusive,rce,exploit \
+  --nuclei-rate 80 --nuclei-conc 15 --nuclei-retries 1
+
+# 2. Broader ports + higher rate (still excludes destructive categories)
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30,100,110,120 \
+  --max-vlans 8 \
+  --secs 120 \
+  --nuclei-severity info,low,medium,high,critical \
+  --nuclei-exclude-tags brute,fuzz,dos,intrusive,rce,exploit \
+  --nuclei-rate 110 --nuclei-conc 22 --nuclei-timeout 10 \
+  --ports "21-23,80,443,445,1433,3306,3389,5432,5900,5985,8000-10000,9200,9443"
+
+# 3. Focused on one VLAN + known subnet
+sudo ./dit-pt run --vlan 500 --iface eth0 --dhcp \
+  --target 10.50.0.0/22 \
+  --nuclei-severity low,medium,high,critical \
+  --nuclei-tags cve,vuln,misconfig,default-login,exposure,fileread \
+  --nuclei-exclude-tags brute,fuzz,dos,intrusive,rce \
+  --nuclei-rate 100 --nuclei-conc 20
+
+# 4. Replay with broader severity against saved targets
+sudo ./dit-pt run --replay 20260210-142211 \
+  --allow-vlans 200,300,400 \
+  --nuclei-severity info,low,medium,high,critical \
+  --nuclei-exclude-tags brute,fuzz,dos,intrusive,rce \
+  --nuclei-rate 90 --nuclei-conc 18
+
+#===============================================================================
+# ISOLATED TARGET / LAB / DEVICE-SPECIFIC TESTING STYLE
+# When scanning one known IP: server, printer, IoT device, etc.
+#===============================================================================
+
+# A. Broad fingerprint — robust server or lab device only
+sudo ./dit-pt run --vlan 999 --iface eth0 --dhcp \
+  --target 192.168.99.47 \
+  --ports "21,22,23,80,443,445,515,631,8080,8443,9100" \
+  --nuclei-severity info,low,medium,high,critical \
+  --nuclei-tags cve,vuln,misconfig,exposure,default-login,ssl,tech,fileread,xxe,http,network \
+  --nuclei-exclude-tags brute,fuzz,dos,intrusive,rce,exploit \
+  --nuclei-rate 150 --nuclei-conc 30 --nuclei-timeout 15 --nuclei-retries 2
+
+# B. High/critical only — fast, targeted, authorized pentest
+sudo ./dit-pt run --vlan 999 --iface eth0 --dhcp \
+  --target 192.168.99.47 \
+  --nuclei-severity high,critical \
+  --nuclei-tags cve,vuln,rce,fileread,xxe,takeover \
+  --nuclei-rate 120 --nuclei-conc 25 --nuclei-retries 3
+
+# C. Tech fingerprint + exposure only — quiet baseline (safe on most devices)
+sudo ./dit-pt run --vlan 999 --iface eth0 --dhcp \
+  --target 192.168.99.47 \
+  --nuclei-severity info,low,medium \
+  --nuclei-tags tech,exposure,ssl,misconfig,default-login \
+  --nuclei-exclude-tags exploit,brute,fuzz,dos,intrusive,rce,cve,vuln \
+  --nuclei-rate 40 --nuclei-conc 8
+
+# D. No nuclei — just nmap port/service discovery
+sudo ./dit-pt run --vlan 999 --iface eth0 --dhcp \
+  --target 192.168.99.47 \
+  --no-nuclei
+
+#===============================================================================
+# REPORTING
+#===============================================================================
+
+# Generate markdown + CSV from a nuclei JSONL output
+./dit-pt-report \
+  --in /var/lib/dit-pt/reports/nuclei-30-20260306-091500.jsonl \
+  --out-dir ./reports \
+  --prefix vlan30-audit
+
+# Include host inventory (ip mac vendor lines) for richer output
+./dit-pt-report \
+  --in /var/lib/dit-pt/reports/nuclei-30-20260306-091500.jsonl \
+  --hosts-file /var/lib/dit-pt/targets/hosts-30-20260306-091500.txt \
+  --out-dir ./reports \
+  --prefix vlan30-audit
+
+# Combine HTTP + network JSONL into one report (cat them first)
+cat /var/lib/dit-pt/reports/nuclei-30-*.jsonl \
+    /var/lib/dit-pt/reports/nuclei-network-30-*.jsonl \
+  > /tmp/combined.jsonl
+./dit-pt-report --in /tmp/combined.jsonl --out-dir ./reports --prefix vlan30-combined
+
+#===============================================================================
+# QUICK REFERENCE — NUCLEI RATE GUIDELINES
+#
+#  Network type               --nuclei-rate  --nuclei-conc  notes
+#  ─────────────────────────  ─────────────  ─────────────  ──────────────────
+#  Unknown / mixed IoT             10-15           2-3       add -rh 5
+#  K-12 / office (known)           20-30           4-6       conservative default
+#  Datacenter / server VLAN        80-120         15-25      standard red team
+#  Isolated lab / single host     120-200         25-40       max signal
+#
+# -rh N = max requests per host (hardcoded to 10 in dit-pt, override via NUCLEI_RH env var)
+# Always start lower and raise if network stays stable.
+#===============================================================================
