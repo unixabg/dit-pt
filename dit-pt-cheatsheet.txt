@@ -10,8 +10,8 @@
 #   4. Adjust --nuclei-rate / --nuclei-conc to match network fragility
 #   5. Embedded devices (printers, IoT, cameras, cheap switches) can crash
 #      under even modest nuclei load — see FRAGILE NETWORK section below
-#   6. -rh (per-host request cap) is hardcoded to 10 in dit-pt (NUCLEI_RH=10)
-#      Override via environment: sudo NUCLEI_RH=5 ./dit-pt run ...
+#   6. nuclei has no per-host request cap. To make --nuclei-rate apply per host
+#      instead of globally (newer nuclei only): sudo NUCLEI_PER_HOST_RL=1 ./dit-pt run ...
 
 #===============================================================================
 # PHASE 0: VLAN DISCOVERY (always start here on a trunk port)
@@ -104,10 +104,8 @@ sudo ./dit-pt run --replay 20260306-091500 \
 # Use when the network has embedded devices: printers, IoT, IP cameras,
 # cheap managed switches, VoIP phones, HVAC controllers, etc.
 # These devices can crash or require reboot under normal nuclei load.
-# -rh caps requests per host regardless of overall rate.
+# Keep --nuclei-rate and --nuclei-conc low; they are the only load controls.
 #===============================================================================
-
-# NOTE: -rh 10 is hardcoded in dit-pt. Override with: sudo NUCLEI_RH=5 ./dit-pt run ...
 
 # 1. Very gentle — low rate, tech/exposure only
 sudo ./dit-pt run --auto \
@@ -239,11 +237,11 @@ cat /var/lib/dit-pt/reports/nuclei-30-*.jsonl \
 #
 #  Network type               --nuclei-rate  --nuclei-conc  notes
 #  ─────────────────────────  ─────────────  ─────────────  ──────────────────
-#  Unknown / mixed IoT             10-15           2-3       add -rh 5
+#  Unknown / mixed IoT             10-15           2-3       --nuclei-retries 0
 #  K-12 / office (known)           20-30           4-6       conservative default
 #  Datacenter / server VLAN        80-120         15-25      standard red team
 #  Isolated lab / single host     120-200         25-40       max signal
 #
-# -rh N = max requests per host (hardcoded to 10 in dit-pt, override via NUCLEI_RH env var)
+# If nuclei fails to start, dit-pt now prints a warning with its exit status.
 # Always start lower and raise if network stays stable.
 #===============================================================================

@@ -41,7 +41,9 @@ NUCLEI_RETRIES="${NUCLEI_RETRIES:-1}"
 NUCLEI_SEV="${NUCLEI_SEV:-info,low,medium}"
 NUCLEI_TAGS="${NUCLEI_TAGS:-exposure,misconfig,ssl,tech}"
 NUCLEI_EXCLUDE_TAGS="${NUCLEI_EXCLUDE_TAGS:-brute,exploit,fuzz,dos,intrusive}"
-NUCLEI_RH="${NUCLEI_RH:-10}"
+# Opt-in: make NUCLEI_RATE apply per host instead of globally (needs a nuclei
+# build that has -per-host-rate-limit; checked at runtime).
+NUCLEI_PER_HOST_RL="${NUCLEI_PER_HOST_RL:-0}"
 
 # Network nuclei knobs (passive-ish defaults)
 # These aim to stay "passive-first": banner/protocol discovery, not credential attempts.
@@ -63,6 +65,38 @@ die()  { echo "[-] $*" >&2; exit 1; }
 nuclei_enabled() {
   [[ "${NO_NUCLEI:-0}" -ne 1 ]] && command -v nuclei >/dev/null 2>&1
 }
+
+# Extra nuclei args that depend on the installed nuclei build.
+# Populates the global array NUCLEI_EXTRA_ARGS.
+NUCLEI_EXTRA_ARGS=()
+nuclei_extra_args() {
+  NUCLEI_EXTRA_ARGS=()
+  if [[ "${NUCLEI_PER_HOST_RL:-0}" -eq 1 ]]; then
+    if nuclei -h 2>&1 | grep -q -- '-per-host-rate-limit'; then
+      NUCLEI_EXTRA_ARGS+=(-per-host-rate-limit)
+    else
+      warn "NUCLEI_PER_HOST_RL=1 but this nuclei has no -per-host-rate-limit; ignoring."
+    fi
+  fi
+}
+
+# Run nuclei and report a failure loudly instead of hiding it.
+# Usage: nuclei_run LABEL OUT_JSONL nuclei-args...
+nuclei_run() {
+  local label="$1" out="$2" rc=0
+  shift 2
+  nuclei_extra_args
+  nuclei "$@" "${NUCLEI_EXTRA_ARGS[@]}" -jsonl -o "$out" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    warn "$label: nuclei exited with status $rc - results are incomplete or missing. Check the nuclei error above."
+    NUCLEI_FAILURES+=("$label")
+  elif [[ -s "$out" ]]; then
+    log "$label results saved: $out"
+  else
+    log "$label finished with no findings (no output file written)."
+  fi
+}
+NUCLEI_FAILURES=()
 
 usage() {
   cat <<EOF
@@ -637,17 +671,13 @@ run_nuclei() {
   fi
 
   log "Phase 6: Running nuclei (templates=$NUCLEI_TEMPLATES_DIR, tags=$NUCLEI_TAGS, exclude=$NUCLEI_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
-  nuclei \
+  nuclei_run "Nuclei" "$out_jsonl" \
     -l "$alive_urls" \
     -t "$NUCLEI_TEMPLATES_DIR" \
     -severity "$NUCLEI_SEV" \
     -tags "$NUCLEI_TAGS" \
     -exclude-tags "$NUCLEI_EXCLUDE_TAGS" \
-    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
-    -rh "$NUCLEI_RH" \
-    -jsonl -o "$out_jsonl" || true
-
-  log "Nuclei results saved: $out_jsonl"
+    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES"
 
   # Cleanup pre-flight temp
   rm -f "$alive_urls"
@@ -701,17 +731,13 @@ run_nuclei_network() {
   fi
 
   log "Phase 6b: Running nuclei network (templates=$NUCLEI_TEMPLATES_DIR/network, tags=$NUCLEI_NET_TAGS, exclude=$NUCLEI_NET_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
-  nuclei \
+  nuclei_run "Nuclei network" "$out_jsonl" \
     -l "$alive_hp" \
     -t "$NUCLEI_TEMPLATES_DIR/network" \
     -severity "$NUCLEI_SEV" \
     -tags "$NUCLEI_NET_TAGS" \
     -exclude-tags "$NUCLEI_NET_EXCLUDE_TAGS" \
-    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES" \
-    -rh "$NUCLEI_RH" \
-    -jsonl -o "$out_jsonl" || true
-
-  log "Nuclei network results saved: $out_jsonl"
+    -rl "$NUCLEI_RATE" -c "$NUCLEI_CONC" -timeout "$NUCLEI_TIMEOUT" -retries "$NUCLEI_RETRIES"
 
   # Cleanup pre-flight temp
   rm -f "$alive_hp"
