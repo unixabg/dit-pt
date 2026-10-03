@@ -54,7 +54,8 @@ deps:
 	@if command -v apt >/dev/null 2>&1; then \
 		$(SUDO) apt update && $(SUDO) apt install -y \
 			bash jq nmap tcpdump arp-scan \
-			ca-certificates curl unzip gawk; \
+			ca-certificates curl unzip gawk \
+			isc-dhcp-client netdiscover; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		$(SUDO) dnf install -y \
 			bash jq nmap tcpdump arp-scan \
@@ -85,7 +86,7 @@ nuclei:
 		TMP="$$(mktemp -d)"; \
 		echo "[*] Downloading latest nuclei ($$PKG)..."; \
 		URL="$$(curl -fsSL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest \
-			| jq -r '.assets[] | select(.name == "'$$PKG'") | .browser_download_url' \
+			| jq -r '.assets[] | select(.name | endswith("_'$$PKG'")) | .browser_download_url' \
 			| head -n1)"; \
 		test -n "$$URL"; \
 		curl -fsSL "$$URL" -o "$$TMP/nuclei.zip"; \
@@ -114,8 +115,13 @@ check:
 	@command -v tcpdump >/dev/null || { echo "Missing: tcpdump"; exit 1; }
 	@command -v arp-scan >/dev/null || { echo "Missing: arp-scan (required)"; exit 1; }
 	@command -v gawk >/dev/null || { echo "Missing: gawk (required)"; exit 1; }
+	@command -v dhclient >/dev/null || echo "Missing: dhclient (needed for --dhcp; Debian: isc-dhcp-client)"
 	@command -v netdiscover >/dev/null || echo "Missing: netdiscover (optional)"
 	@command -v nuclei >/dev/null || echo "Missing: nuclei (optional)"
+	@if command -v nuclei >/dev/null; then \
+		ls -A "$(NUCLEI_TEMPLATE_DIR)" 2>/dev/null | grep -q . \
+			|| echo "Missing: nuclei templates in $(NUCLEI_TEMPLATE_DIR) (run: make templates)"; \
+	fi
 	@echo "[+] Check complete"
 
 uninstall:
