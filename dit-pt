@@ -137,7 +137,7 @@ Usage:
       Scan a specific VLAN (phases 2-6).
 
   $NAME run --auto [--iface IFACE] [--secs N] [--max-vlans N]
-      [--allow-vlans CSV] [--include-native]
+      [--allow-vlans CSV] [--scan-unseen] [--include-native]
       [--skip-netdiscover] [--no-nuclei]
       [--netdiscover-secs N]
       [--workdir DIR] [--ports CSV]
@@ -187,6 +187,10 @@ Auto mode:
 
   --allow-vlans CSV
       Only scan/replay these VLAN IDs (strongly recommended).
+
+  --scan-unseen
+      With --allow-vlans: also scan allow-listed VLANs that were quiet during
+      the sniff window. Without it they are reported as not scanned.
 
   --include-native
       Also scan/replay the native/untagged network (DHCP on base interface).
@@ -387,12 +391,6 @@ filter_allowlist() {
   done
 }
 
-cap_lines() {
-  # cap stdin to N lines
-  local max="$1"
-  head -n "$max"
-}
-
 # ----- Phase 2: Join VLAN -----
 
 # IMPORTANT: Linux interface names max length is 15 chars.
@@ -423,12 +421,18 @@ bring_up_vlan_dhcp() {
   ensure_vlan_iface_absent "$v_if"
 
   log "Phase 2: Creating VLAN interface $v_if (id=$vlan) on $iface"
-  ip link add link "$iface" name "$v_if" type vlan id "$vlan"
-  ip link set "$v_if" up
+  if ! ip link add link "$iface" name "$v_if" type vlan id "$vlan" || ! ip link set "$v_if" up; then
+    warn "Could not create VLAN interface $v_if on $iface"
+    return 1
+  fi
 
-  command -v dhclient >/dev/null || die "dhclient required for --dhcp"
+  # -1: try once and exit non-zero if no lease is offered, instead of
+  # going to the background and leaving an interface with no address.
   log "Requesting DHCP lease on $v_if"
-  dhclient -v "$v_if" || die "DHCP failed on $v_if"
+  if ! dhclient -1 -v "$v_if" >&2; then
+    warn "No DHCP lease on $v_if (VLAN $vlan)"
+    return 1
+  fi
 
   echo "$v_if"
 }
@@ -807,7 +811,13 @@ run_all_phases() {
   # Record the interface before creating it so the EXIT trap can remove it.
   ACTIVE_VLAN_IF="$(vlan_iface_name "$vlan")"
   if [[ "$mode" == "dhcp" ]]; then
-    v_if="$(bring_up_vlan_dhcp "$iface" "$vlan")"
+    command -v dhclient >/dev/null || die "dhclient required for --dhcp (Debian: apt install isc-dhcp-client)"
+    if ! v_if="$(bring_up_vlan_dhcp "$iface" "$vlan")"; then
+      warn "VLAN $vlan NOT scanned: could not join with DHCP. Use --vlan $vlan --static CIDR --gw GW to cover it."
+      NO_DHCP_VLANS+=("$vlan")
+      teardown_vlan "$vlan"
+      return 0
+    fi
   else
     [[ -n "$static_cidr" ]] || die "--static requires CIDR (e.g., 10.30.0.50/24)"
     [[ -n "$gw" ]] || die "--gw required with --static"
@@ -863,6 +873,27 @@ run_all_phases() {
   fi
 }
 
+# Coverage bookkeeping, reported at the end of a run.
+NO_DHCP_VLANS=()
+UNSEEN_VLANS=()
+CAPPED_VLANS=()
+
+coverage_summary() {
+  if [[ ${#UNSEEN_VLANS[@]} -gt 0 ]]; then
+    warn "COVERAGE: allow-listed VLANs not seen while sniffing, NOT scanned: ${UNSEEN_VLANS[*]} (use --scan-unseen or a longer --secs)"
+  fi
+  if [[ ${#CAPPED_VLANS[@]} -gt 0 ]]; then
+    warn "COVERAGE: VLANs dropped by --max-vlans, NOT scanned: ${CAPPED_VLANS[*]}"
+  fi
+  if [[ ${#NO_DHCP_VLANS[@]} -gt 0 ]]; then
+    warn "COVERAGE: VLANs with no DHCP lease, NOT scanned: ${NO_DHCP_VLANS[*]} (use --vlan N --static CIDR --gw GW)"
+  fi
+  if [[ ${#NUCLEI_FAILURES[@]} -gt 0 ]]; then
+    warn "COVERAGE: nuclei failed ${#NUCLEI_FAILURES[@]} time(s); those results are missing."
+  fi
+  return 0
+}
+
 run_auto() {
   local iface="$1"
   local secs="$2"
@@ -870,17 +901,58 @@ run_auto() {
   local allow_csv="$4"
   local include_native="$5"
   local skip_netdiscover="$6"
+  local scan_unseen="${7:-0}"
 
   check_tools
   ensure_dirs
   ensure_nuclei_templates
 
+  [[ "$max_vlans" =~ ^[0-9]+$ ]] || die "--max-vlans must be a number"
+  if [[ -n "$allow_csv" ]]; then
+    [[ "$allow_csv" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--allow-vlans must be a comma-separated list of VLAN IDs (e.g. 10,20,30)"
+  fi
+  if [[ "$scan_unseen" -eq 1 && -z "$allow_csv" ]]; then
+    die "--scan-unseen requires --allow-vlans"
+  fi
+
   log "Auto mode: discovering tagged VLANs on $iface for ${secs}s"
-  local vlans
-  vlans="$(discover_vlan_ids "$iface" "$secs" | filter_allowlist "$allow_csv" | cap_lines "$max_vlans" || true)"
+  local observed selected vlans v a
+  observed="$(discover_vlan_ids "$iface" "$secs" || true)"
 
   if [[ -z "$allow_csv" ]]; then
     warn "Auto mode without --allow-vlans: you may scan unintended VLANs. Strongly recommend setting an allowlist."
+    selected="$observed"
+  else
+    selected="$(echo "$observed" | filter_allowlist "$allow_csv" || true)"
+    # Allow-listed VLANs that stayed quiet during the sniff window
+    for a in ${allow_csv//,/ }; do
+      if ! grep -qx "$a" <<< "$observed"; then
+        if [[ "$scan_unseen" -eq 1 ]]; then
+          log "VLAN $a not seen while sniffing; scanning anyway (--scan-unseen)"
+          selected+="${selected:+$'\n'}$a"
+        else
+          warn "VLAN $a is allow-listed but was not seen in ${secs}s of sniffing; it will NOT be scanned."
+          UNSEEN_VLANS+=("$a")
+        fi
+      fi
+    done
+    selected="$(echo "$selected" | sort -n | uniq)"
+  fi
+
+  # Apply the cap, and say what it dropped
+  vlans=""
+  local n=0
+  while read -r v; do
+    [[ -n "$v" ]] || continue
+    if [[ "$n" -lt "$max_vlans" ]]; then
+      vlans+="${vlans:+$'\n'}$v"
+      n=$((n + 1))
+    else
+      CAPPED_VLANS+=("$v")
+    fi
+  done <<< "$selected"
+  if [[ ${#CAPPED_VLANS[@]} -gt 0 ]]; then
+    warn "--max-vlans $max_vlans reached; NOT scanning: ${CAPPED_VLANS[*]} (raise --max-vlans to include them)"
   fi
 
   if [[ -z "$vlans" ]]; then
@@ -916,6 +988,7 @@ run_auto() {
 
   log "Auto mode complete. Run timestamp: $RUN_TS"
   log "Re-run nuclei on these targets later with: $NAME run --replay $RUN_TS"
+  coverage_summary
 }
 
 run_replay_ts() {
@@ -1017,7 +1090,13 @@ run_replay_ts() {
       save_default_route
       v_if="$(bring_up_vlan_static "$iface" "$scope" "$static_cidr" "$gw")"
     else
-      v_if="$(bring_up_vlan_dhcp "$iface" "$scope")"
+      command -v dhclient >/dev/null || die "dhclient required for --dhcp (Debian: apt install isc-dhcp-client)"
+      if ! v_if="$(bring_up_vlan_dhcp "$iface" "$scope")"; then
+        warn "Replay: VLAN $scope skipped: could not join with DHCP."
+        NO_DHCP_VLANS+=("$scope")
+        teardown_vlan "$scope"
+        continue
+      fi
     fi
 
     local out_http out_net
@@ -1048,6 +1127,7 @@ run_replay_ts() {
   done <<< "$scopes"
 
   log "Replay complete."
+  coverage_summary
 }
 
 list_replay_scopes() {
@@ -1097,6 +1177,7 @@ case "$cmd" in
     auto=0
     include_native=0
     allow_vlans=""
+    scan_unseen=0
     local_secs="$SNIFF_SECS"
     local_max_vlans="$MAX_AUTO_VLANS"
 
@@ -1117,6 +1198,7 @@ case "$cmd" in
         --auto) auto=1; shift ;;
         --include-native) include_native=1; shift ;;
         --allow-vlans) allow_vlans="$2"; shift 2 ;;
+        --scan-unseen) scan_unseen=1; shift ;;
         --secs|--sniff-secs) local_secs="$2"; shift 2 ;;
         --max-vlans) local_max_vlans="$2"; shift 2 ;;
 
@@ -1170,7 +1252,7 @@ case "$cmd" in
     # Auto mode
     if [[ "$auto" -eq 1 ]]; then
       [[ "$mode" == "dhcp" ]] || die "--auto currently supports DHCP scanning only (drop --static/--gw)"
-      run_auto "$local_iface" "$local_secs" "$local_max_vlans" "$allow_vlans" "$include_native" "$skip_netdiscover"
+      run_auto "$local_iface" "$local_secs" "$local_max_vlans" "$allow_vlans" "$include_native" "$skip_netdiscover" "$scan_unseen"
       exit 0
     fi
 
@@ -1184,8 +1266,9 @@ case "$cmd" in
       [[ -n "$static_cidr" ]] || die "--static requires CIDR"
       [[ -n "$gw" ]] || die "--gw required with --static"
       run_all_phases "$local_iface" "$vlan_id" "static" "$static_cidr" "$gw" "$skip_netdiscover" "$target_ip"
-
     fi
+    coverage_summary
+    [[ ${#NO_DHCP_VLANS[@]} -eq 0 ]] || exit 2
     ;;
 
   *)
