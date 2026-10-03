@@ -18,7 +18,8 @@ Options:
   --in FILE.jsonl         Input nuclei JSONL file (required)
   --out-dir DIR           Output directory (default: current dir)
   --prefix NAME           Output filename prefix (default: input filename w/o .jsonl)
-  --hosts-file FILE       Optional: host inventory file with `ip mac vendor` (default: /var/lib/dit-pt/targets/hosts)
+  --hosts-file FILE       Optional: host inventory file with \`ip mac vendor\` lines
+                          (default: the hosts-<scope>-<ts>.txt in ../targets that matches the input file)
   -h, --help              Show help
 EOF
 }
@@ -50,7 +51,7 @@ check_requirements() {
 IN=""
 OUT_DIR="."
 PREFIX=""
-HOSTS_FILE="/var/lib/dit-pt/targets/hosts"
+HOSTS_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,6 +72,19 @@ mkdir -p "$OUT_DIR"
 
 if [[ -z "$PREFIX" ]]; then
   PREFIX="$(basename "$IN" .jsonl)"
+fi
+
+# No --hosts-file given: look for the inventory written by the same dit-pt run.
+#   reports/nuclei[-network][-replay]-<scope>-<ts>[-<replay ts>].jsonl
+#   -> targets/hosts-<scope>-<ts>.txt
+if [[ -z "$HOSTS_FILE" ]]; then
+  in_base="$(basename "$IN" .jsonl)"
+  if [[ "$in_base" =~ ^nuclei(-network)?(-replay)?-([^-]+)-([0-9]{8}-[0-9]{6}) ]]; then
+    guess="$(dirname "$IN")/../targets/hosts-${BASH_REMATCH[3]}-${BASH_REMATCH[4]}.txt"
+    if [[ -f "$guess" ]]; then
+      HOSTS_FILE="$guess"
+    fi
+  fi
 fi
 
 MD_OUT="$OUT_DIR/$PREFIX.md"
