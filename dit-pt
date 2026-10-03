@@ -448,30 +448,61 @@ bring_up_vlan_static() {
   ip addr flush dev "$v_if" || true
   ip addr add "$cidr" dev "$v_if"
 
-  warn "Replacing default route with $gw via $v_if — this will affect all outbound traffic on this host."
+  warn "Replacing default route with $gw via $v_if — this affects all outbound traffic on this host until teardown restores it."
   log "Setting default gateway $gw via $v_if"
   ip route replace default via "$gw" dev "$v_if"
 
   echo "$v_if"
 }
 
+# State for cleanup. These are globals on purpose: the EXIT trap runs after
+# the functions have returned, when their locals no longer exist.
+ACTIVE_VLAN_IF=""
+ORIG_DEFAULT_ROUTE=""
+
+save_default_route() {
+  ORIG_DEFAULT_ROUTE="$(ip route show default 2>/dev/null | head -n1 || true)"
+}
+
+restore_default_route() {
+  [[ -n "$ORIG_DEFAULT_ROUTE" ]] || return 0
+  log "Restoring default route: $ORIG_DEFAULT_ROUTE"
+  # shellcheck disable=SC2086  # word splitting of the saved route is intended
+  ip route replace $ORIG_DEFAULT_ROUTE 2>/dev/null \
+    || warn "Could not restore default route ($ORIG_DEFAULT_ROUTE); fix it by hand."
+  ORIG_DEFAULT_ROUTE=""
+}
+
+# Accepts a VLAN ID (30) or the interface name (dit30).
 teardown_vlan() {
-  local v_if="$1"
+  local v_if="${1:-}"
   [[ -n "$v_if" ]] || return 0
 
-  # Only two types to teardown dit or d
-  if ip link show dev "dit$v_if" >/dev/null 2>&1; then
-    v_if="dit$v_if"
-  else
-    v_if="d$v_if"
+  if [[ "$v_if" =~ ^[0-9]+$ ]]; then
+    v_if="$(vlan_iface_name "$v_if")"
   fi
-  log "Tearing down $v_if"
-  if command -v dhclient >/dev/null; then
-    dhclient -r "$v_if" >/dev/null 2>&1 || true
-  fi
-  ip link del "$v_if" >/dev/null 2>&1 || true
 
+  if ip link show dev "$v_if" >/dev/null 2>&1; then
+    log "Tearing down $v_if"
+    if command -v dhclient >/dev/null; then
+      dhclient -r "$v_if" >/dev/null 2>&1 || true
+    fi
+    ip link del "$v_if" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$ACTIVE_VLAN_IF" == "$v_if" ]]; then
+    ACTIVE_VLAN_IF=""
+  fi
+  restore_default_route
+  return 0
 }
+
+cleanup() {
+  teardown_vlan "$ACTIVE_VLAN_IF"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Native/untagged scan helper (DHCP on base interface)
 run_native_phases_dhcp() {
@@ -761,8 +792,6 @@ run_all_phases() {
   ts="$(date +%Y%m%d-%H%M%S)"
   v_if=""
 
-  trap '[[ -n "${vlan:-}" ]] && teardown_vlan "$vlan"' EXIT
-
   hosts_file="$WORKDIR/targets/hosts-${vlan}-${ts}.txt"
   nmap_xml="$WORKDIR/nmap/nmap-${vlan}-${ts}.xml"
   urls_file="$WORKDIR/targets/urls-${vlan}-${ts}.txt"
@@ -771,11 +800,14 @@ run_all_phases() {
   nuclei_net_out="$WORKDIR/reports/nuclei-network-${vlan}-${ts}.jsonl"
 
   # Phase 2: Join VLAN
+  # Record the interface before creating it so the EXIT trap can remove it.
+  ACTIVE_VLAN_IF="$(vlan_iface_name "$vlan")"
   if [[ "$mode" == "dhcp" ]]; then
     v_if="$(bring_up_vlan_dhcp "$iface" "$vlan")"
   else
     [[ -n "$static_cidr" ]] || die "--static requires CIDR (e.g., 10.30.0.50/24)"
     [[ -n "$gw" ]] || die "--gw required with --static"
+    save_default_route
     v_if="$(bring_up_vlan_static "$iface" "$vlan" "$static_cidr" "$gw")"
   fi
 
@@ -975,7 +1007,9 @@ run_replay_ts() {
     # VLAN replay (DHCP only)
     log "=== Replay VLAN $scope (TS=$replay_ts) ==="
     local v_if=""
+    ACTIVE_VLAN_IF="$(vlan_iface_name "$scope")"
     if [[ "$mode" == "static" ]]; then
+      save_default_route
       v_if="$(bring_up_vlan_static "$iface" "$scope" "$static_cidr" "$gw")"
     else
       v_if="$(bring_up_vlan_dhcp "$iface" "$scope")"
