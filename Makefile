@@ -101,7 +101,7 @@ templates:
 	@command -v nuclei >/dev/null || { echo "[-] nuclei not installed"; exit 1; }
 
 	$(SUDO) mkdir -p $(NUCLEI_TEMPLATE_DIR)
-	$(SUDO) nuclei -update-templates -templates $(NUCLEI_TEMPLATE_DIR)
+	$(SUDO) nuclei -update-templates -ud $(NUCLEI_TEMPLATE_DIR)
 
 	@echo "[+] Templates installed to $(NUCLEI_TEMPLATE_DIR)"
 

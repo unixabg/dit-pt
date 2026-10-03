@@ -66,6 +66,25 @@ nuclei_enabled() {
   [[ "${NO_NUCLEI:-0}" -ne 1 ]] && command -v nuclei >/dev/null 2>&1
 }
 
+nuclei_templates_present() {
+  [[ -n "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]
+}
+
+# Install templates into NUCLEI_TEMPLATES_DIR if missing. Call this BEFORE
+# joining a VLAN, while the host still has its normal route to the internet.
+ensure_nuclei_templates() {
+  nuclei_enabled || return 0
+  mkdir -p "$NUCLEI_TEMPLATES_DIR"
+  nuclei_templates_present && return 0
+
+  log "Nuclei templates not found; installing to $NUCLEI_TEMPLATES_DIR"
+  nuclei -update-templates -ud "$NUCLEI_TEMPLATES_DIR" >&2 \
+    || warn "nuclei template install failed (no internet?)"
+
+  nuclei_templates_present \
+    || die "No nuclei templates in $NUCLEI_TEMPLATES_DIR. Run: sudo nuclei -update-templates -ud $NUCLEI_TEMPLATES_DIR  (or pass --no-nuclei)"
+}
+
 # Extra nuclei args that depend on the installed nuclei build.
 # Populates the global array NUCLEI_EXTRA_ARGS.
 NUCLEI_EXTRA_ARGS=()
@@ -658,16 +677,10 @@ run_nuclei() {
 
   log "Preflight URLs: $(wc -l < "$urls_file" | tr -d ' ') -> $(wc -l < "$alive_urls" | tr -d ' ') reachable"
 
-  mkdir -p "$NUCLEI_TEMPLATES_DIR"
-
-  # Ensure templates exist in our chosen directory
-  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
-    log "Nuclei templates not found; installing to $NUCLEI_TEMPLATES_DIR"
-    nuclei -update-templates -ut "$NUCLEI_TEMPLATES_DIR" >/dev/null 2>&1 || true
-  fi
-
-  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
-    die "No nuclei templates found in $NUCLEI_TEMPLATES_DIR. Try: sudo nuclei -update-templates"
+  if ! nuclei_templates_present; then
+    warn "No nuclei templates in $NUCLEI_TEMPLATES_DIR; skipping nuclei. Run: sudo nuclei -update-templates -ud $NUCLEI_TEMPLATES_DIR"
+    rm -f "$alive_urls"
+    return 0
   fi
 
   log "Phase 6: Running nuclei (templates=$NUCLEI_TEMPLATES_DIR, tags=$NUCLEI_TAGS, exclude=$NUCLEI_EXCLUDE_TAGS, severity=$NUCLEI_SEV)"
@@ -717,16 +730,9 @@ run_nuclei_network() {
 
   log "Preflight hostports: $(wc -l < "$hostports_file" | tr -d ' ') -> $(wc -l < "$alive_hp" | tr -d ' ') reachable"
 
-  mkdir -p "$NUCLEI_TEMPLATES_DIR"
-
-  # Ensure templates exist in our chosen directory
-  if [[ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]]; then
-    log "Nuclei templates not found; installing to $NUCLEI_TEMPLATES_DIR"
-    nuclei -update-templates -ut "$NUCLEI_TEMPLATES_DIR" >/dev/null 2>&1 || true
-  fi
-
   if [[ ! -d "$NUCLEI_TEMPLATES_DIR/network" ]]; then
     warn "No nuclei network templates found at $NUCLEI_TEMPLATES_DIR/network; skipping network scan."
+    rm -f "$alive_hp"
     return 0
   fi
 
@@ -749,6 +755,7 @@ run_all_phases() {
 
   check_tools
   ensure_dirs
+  ensure_nuclei_templates
 
   local ts v_if hosts_file nmap_xml urls_file hostports_file nuclei_out nuclei_net_out
   ts="$(date +%Y%m%d-%H%M%S)"
@@ -830,6 +837,7 @@ run_auto() {
 
   check_tools
   ensure_dirs
+  ensure_nuclei_templates
 
   log "Auto mode: discovering tagged VLANs on $iface for ${secs}s"
   local vlans
@@ -884,6 +892,7 @@ run_replay_ts() {
 
   check_tools
   ensure_dirs
+  ensure_nuclei_templates
 
   [[ -n "$replay_ts" ]] || die "--replay requires a timestamp like 20260129-161131"
   [[ "$replay_ts" =~ ^[0-9]{8}-[0-9]{6}$ ]] || warn "Replay TS '$replay_ts' doesn't match expected YYYYMMDD-HHMMSS; continuing."
