@@ -460,6 +460,10 @@ bring_up_vlan_static() {
 ACTIVE_VLAN_IF=""
 ORIG_DEFAULT_ROUTE=""
 
+# One timestamp for the whole invocation, so every VLAN of an --auto run
+# shares it and --replay TS finds all of them.
+RUN_TS="${RUN_TS:-$(date +%Y%m%d-%H%M%S)}"
+
 save_default_route() {
   ORIG_DEFAULT_ROUTE="$(ip route show default 2>/dev/null | head -n1 || true)"
 }
@@ -514,7 +518,7 @@ run_native_phases_dhcp() {
   ensure_dirs
 
   local ts hosts_file nmap_xml urls_file hostports_file nuclei_out nuclei_net_out
-  ts="$(date +%Y%m%d-%H%M%S)"
+  ts="$RUN_TS"
   hosts_file="$WORKDIR/targets/hosts-native-${ts}.txt"
   nmap_xml="$WORKDIR/nmap/nmap-native-${ts}.xml"
   urls_file="$WORKDIR/targets/urls-native-${ts}.txt"
@@ -789,7 +793,7 @@ run_all_phases() {
   ensure_nuclei_templates
 
   local ts v_if hosts_file nmap_xml urls_file hostports_file nuclei_out nuclei_net_out
-  ts="$(date +%Y%m%d-%H%M%S)"
+  ts="$RUN_TS"
   v_if=""
 
   hosts_file="$WORKDIR/targets/hosts-${vlan}-${ts}.txt"
@@ -838,7 +842,7 @@ run_all_phases() {
     warn "No hosts discovered; skipping nmap/nuclei."
   fi
 
-  log "Done."
+  log "Done. Run timestamp: $ts"
   log "Artifacts:"
   echo "  VLAN       : $vlan ($v_if on $iface)"
   echo "  Hosts      : $hosts_file"
@@ -910,7 +914,8 @@ run_auto() {
     run_native_phases_dhcp "$iface" "$skip_netdiscover"
   fi
 
-  log "Auto mode complete."
+  log "Auto mode complete. Run timestamp: $RUN_TS"
+  log "Re-run nuclei on these targets later with: $NAME run --replay $RUN_TS"
 }
 
 run_replay_ts() {
