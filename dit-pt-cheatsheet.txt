@@ -1,5 +1,5 @@
 # dit-pt-cheatsheet.txt
-# Last updated: March 2026
+# Last updated: October 2026
 # Purpose: realistic command-line examples for different risk profiles
 #          when using dit-pt + nuclei
 #
@@ -37,6 +37,22 @@ sudo ./dit-pt run --auto \
   --secs 40 \
   --no-nuclei \
   --skip-netdiscover
+
+# Auto — also scan allow-listed VLANs that were quiet during the sniff.
+# Read the COVERAGE lines at the end of every run: they list what was NOT scanned.
+sudo ./dit-pt run --auto \
+  --iface eth0 \
+  --allow-vlans 10,20,30,50,100 \
+  --scan-unseen \
+  --max-vlans 10 \
+  --secs 40 \
+  --no-nuclei \
+  --skip-netdiscover
+
+# VLAN with no DHCP (often management) — join with a static address
+sudo ./dit-pt run --vlan 99 --iface eth0 \
+  --static 10.99.0.250/24 --gw 10.99.0.1 \
+  --no-nuclei
 
 # Auto — include native/untagged VLAN as well (DHCP on base iface — affects routing)
 sudo ./dit-pt run --auto \
